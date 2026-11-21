@@ -23,10 +23,12 @@ agentlink-core（静态库，不依赖 GUI）
   └── settings  本地存储：服务器列表 + 登录态
 
 agentlink-qt（可执行程序，依赖 Widgets）
-  ├── Onboarding      引导：填地址 → 注册/登录
-  ├── MainWindow      胶水层：把 Client 的事件分发给两个面板 + 服务器菜单
+  ├── Onboarding       引导：填地址 → 注册/登录
+  ├── MainWindow       胶水层：事件分发 + 菜单（建群 / 群信息 / 搜索 / 切换服务器）
   ├── ConversationList 左侧：会话列表
-  └── ChatWindow      右侧：消息流 + 输入框
+  ├── ChatWindow       右侧：消息流（QListWidget + 每条消息一个 MessageItem）
+  ├── MessageItem      单条消息：文本 / 图片缩略图 / 视频缩略图 / 流式 + 打断
+  ├── CreateGroupDialog / GroupInfoDialog / SearchPanel
 ```
 
 **为什么协议核心单独成库且不依赖 GUI**：协议逻辑是最容易出错、也最值得测的部分，
@@ -107,8 +109,8 @@ node scripts/acceptance.mjs
   能读你 home 目录的人能拿到你的聊天身份。v1 不接系统钥匙串（那要额外的
   平台依赖：Linux 上是 libsecret / kwallet，各家还不一样）。
 - **不做端到端加密**。协议明确排除（需求确认书 §5）。
-- **UI 是功能导向的**：会话列表、消息流、输入框、发附件。不做多语言、不做
-  移动端、不做音视频。
+- **UI 是功能导向的**：会话列表、消息流（含内联图片/视频缩略图）、回复、撤回、
+  打断 AI、建群、群信息、消息搜索、发附件。不做多语言、不做移动端、不做音视频。
 - **编辑/撤回消息用"重拉历史"**重渲染，而不是增量更新。v1 频率低，不值得做增量。
 
 ## 测试
@@ -127,7 +129,7 @@ ctest --test-dir build -R e2e --output-on-failure
 | `test-frames` | 帧编解码：req/res/evt、瞬时事件 seq=null、坏帧拒收、1 MiB 上限、往返一致 |
 | `test-address` | 服务器地址解析：补协议头、https→wss、保端口、拒垃圾输入、http base |
 | `test-settings` | 多服务器读写：覆盖不丢激活标记、激活切换、重载持久化 |
-| `test-e2e` | **真连服务端**：注册 → WS 认证 → 建群 → 发消息 → 收推送 → 读历史 → 上传附件 |
+| `test-e2e` | **真连服务端**：注册 → WS 认证 → 建群 → 发消息 → 收推送 → 读历史 → 上传附件 → 回复(reply_to) → 撤回 → 群信息(group.update) → 搜索(search.messages) |
 
 `test-e2e` 在没有 `AGENTLINK_TEST_URL` 时**跳过**（退出码 77），不是失败。
 
