@@ -6,6 +6,7 @@
 
 class QLabel;
 class QPushButton;
+class QWidget;
 
 namespace agentlink {
 
@@ -17,12 +18,11 @@ class AuthApi;
  * ## 为什么每条消息一个 QWidget 而不是继续用 QTextBrowser
  *
  * QTextBrowser 是**一整块富文本文档**，没法对"某一条消息"做：
- *   - 右键菜单（回复 / 撤回 / 复制）
+ *   - 右键菜单（回复 / 撤回 / 复制 / 编辑 / 转发 / 置顶 / 回应）
  *   - 流式正文的**原地更新**（stream.delta 来了要改一条已有的消息）
  *   - 图片内联缩略图（一个 <img> 标签加载远程 URL 要自己管认证头，浏览器控件不干这个）
  *
  * 换成 QListWidget + 每行一个 MessageItem，上面这些都变成"改一个 widget"。
- * 代价是自己算行高 —— 但 QListWidget 的 item 是自适应的，代价可控。
  */
 class MessageItem : public QWidget {
   Q_OBJECT
@@ -40,6 +40,14 @@ class MessageItem : public QWidget {
   /// 流式更新：只改正文与「打断」按钮，不重建整个 widget。
   void updateStreaming(const QString& text, bool streaming);
 
+  /// 表情回应（全量替换，来自 message.reaction 事件或 reaction.add/remove 的响应）。
+  void setReactions(const QVariantList& reactions);
+
+  /// 自己能不能置顶（群主/管理员）。
+  void setCanPin(bool can) { canPin_ = can; }
+  /// 自己的 id（判断"这条回应里有没有我"）。
+  void setSelfId(const QString& id) { selfId_ = id; }
+
   /// 引用消息的正文解析器（历史里的 reply_to 靠它拿到"回复了谁/什么"）。
   void setQuoteResolver(std::function<QString(const QString&)> resolver) {
     quoteResolver_ = std::move(resolver);
@@ -51,7 +59,12 @@ class MessageItem : public QWidget {
  signals:
   void replyRequested(const QString& messageId);
   void revokeRequested(const QString& messageId);
+  void editRequested(const QString& messageId);
+  void forwardRequested(const QString& messageId);
+  void pinRequested(const QString& messageId);
   void interruptRequested(const QString& messageId);
+  /// 点表情回应：remove=true 表示"我已经点过这个表情，再点取消"。
+  void reactionRequested(const QString& messageId, const QString& emoji, bool remove);
   /// 点图片：打开大图。
   void imageClicked(const QString& attachmentId);
   /// 点文件：下载并交给系统打开。
@@ -62,12 +75,13 @@ class MessageItem : public QWidget {
 
  private:
   void rebuild();
+  void rebuildReactions();
   void addTextBlock(const QString& text);
   void addImageBlock(const QString& attachmentId);
   void addFileBlock(const QVariantMap& block);
   void loadImageInto(QLabel* label, const QString& attachmentId);
   void loadThumbnailInto(QLabel* label, const QString& attachmentId, const QString& fallback);
-  void openImageFull(const QString& attachmentId);
+  bool mineReaction(const QString& emoji) const;
 
   AuthApi* api_ = nullptr;
   std::function<QString()> token_;
@@ -78,13 +92,17 @@ class MessageItem : public QWidget {
   QLabel* statusLabel_ = nullptr;
   QLabel* quoteLabel_ = nullptr;
   QWidget* contentBox_ = nullptr;
+  QWidget* reactionsBox_ = nullptr;
   QLabel* streamingLabel_ = nullptr;
   QPushButton* interruptButton_ = nullptr;
 
   QVariantMap message_;
+  QVariantList reactions_;
   QString messageId_;
   QString senderId_;
+  QString selfId_;
   bool isSelf_ = false;
+  bool canPin_ = false;
 };
 
 }  // namespace agentlink

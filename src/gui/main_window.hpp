@@ -43,6 +43,10 @@ class MainWindow : public QMainWindow {
   void onAttachmentRequested();
   void onConversationSelected(const QString& convId);
   void onRevokeRequested(const QString& messageId);
+  void onEditRequested(const QString& messageId);
+  void onForwardRequested(const QString& messageId);
+  void onPinRequested(const QString& messageId);
+  void onReactionRequested(const QString& messageId, const QString& emoji, bool remove);
   void onInterruptRequested(const QString& messageId);
   void onImageRequested(const QString& attachmentId);
   void onFileRequested(const QString& attachmentId, const QString& filename);
@@ -50,6 +54,7 @@ class MainWindow : public QMainWindow {
   void onOpenGroupInfo();
   void onToggleSearch();
   void onJumpToMessage(const QString& convId, const QString& messageId, qint64 seq);
+  void onInputTextChanged();
 
  private:
   void buildMenus();
@@ -57,6 +62,8 @@ class MainWindow : public QMainWindow {
   void sendMessage(const QString& text, const QString& replyToId);
   void sendAttachment(const QString& filePath);
   void saveGroupInfo(const QString& title, const QString& announcement);
+  void forwardMessage(const QString& messageId);
+  void reportRead(qint64 lastSeq);
 
   Client* client_ = nullptr;
   AuthApi* api_ = nullptr;
@@ -70,6 +77,7 @@ class MainWindow : public QMainWindow {
   QString convTitle_;
   QString convAnnouncement_;
   QVariantList members_;
+  qint64 lastTypingSent_ = 0;
 };
 
 }  // namespace agentlink

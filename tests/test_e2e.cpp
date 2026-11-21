@@ -34,6 +34,10 @@ class TestE2E : public QObject {
   void revokesOwnMessage();
   void updatesGroupInfo();
   void searchesMessages();
+  void reactsToMessage();
+  void editsOwnMessage();
+  void pinsMessage();
+  void forwardsMessage();
 
  private:
   /// 跑一个事件循环直到 predicate 为真或超时。
@@ -515,6 +519,285 @@ void TestE2E::searchesMessages() {
     if (hit.value(QStringLiteral("conv_id")).toString() == convId) found = true;
   }
   QVERIFY(found);
+}
+
+void TestE2E::reactsToMessage() {
+  AuthResult auth;
+  Client client;
+  QVERIFY(registerAndConnect(auth, client, QStringLiteral("qt_react")));
+
+  QVariantMap conv;
+  bool convDone = false;
+  client.send(QStringLiteral("conv.create"),
+              QVariantMap{{QStringLiteral("kind"), QStringLiteral("group")},
+                          {QStringLiteral("title"), QStringLiteral("回应测试")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                conv = data.value(QStringLiteral("conv")).toMap();
+                convDone = true;
+              });
+  QVERIFY(waitFor([&] { return convDone; }));
+  const QString convId = conv.value(QStringLiteral("id")).toString();
+
+  QString msgId;
+  bool sendDone = false;
+  client.send(QStringLiteral("message.send"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("client_msg_id"), QStringLiteral("qt-react-1")},
+                          {QStringLiteral("content"),
+                           QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                                   {QStringLiteral("text"), QStringLiteral("来点个赞")}}}}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                msgId = data.value(QStringLiteral("message_id")).toString();
+                sendDone = true;
+              });
+  QVERIFY(waitFor([&] { return sendDone; }));
+
+  bool reactDone = false;
+  client.send(QStringLiteral("reaction.add"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("message_id"), msgId},
+                          {QStringLiteral("emoji"), QStringLiteral("👍")}},
+              [&](bool ok, const QVariantMap&, const WireError&) {
+                QVERIFY(ok);
+                reactDone = true;
+              });
+  QVERIFY(waitFor([&] { return reactDone; }));
+
+  // history 里这条消息的 reactions 有 👍 且包含自己
+  QVariantMap history;
+  bool histDone = false;
+  client.send(QStringLiteral("history.fetch"),
+              QVariantMap{{QStringLiteral("conv_id"), convId}, {QStringLiteral("limit"), 10}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                history = data;
+                histDone = true;
+              });
+  QVERIFY(waitFor([&] { return histDone; }));
+
+  const QVariantList messages = history.value(QStringLiteral("messages")).toList();
+  for (const QVariant& m : messages) {
+    const QVariantMap msg = m.toMap();
+    if (msg.value(QStringLiteral("id")).toString() != msgId) continue;
+    const QVariantList reactions = msg.value(QStringLiteral("reactions")).toList();
+    for (const QVariant& r : reactions) {
+      const QVariantMap reaction = r.toMap();
+      if (reaction.value(QStringLiteral("emoji")).toString() == QStringLiteral("👍")) {
+        QVERIFY(reaction.value(QStringLiteral("user_ids")).toList().contains(auth.userId));
+        return;
+      }
+    }
+    QVERIFY2(false, "没找到 👍 回应");
+  }
+  QVERIFY2(false, "没找到消息");
+}
+
+void TestE2E::editsOwnMessage() {
+  AuthResult auth;
+  Client client;
+  QVERIFY(registerAndConnect(auth, client, QStringLiteral("qt_edit")));
+
+  QVariantMap conv;
+  bool convDone = false;
+  client.send(QStringLiteral("conv.create"),
+              QVariantMap{{QStringLiteral("kind"), QStringLiteral("group")},
+                          {QStringLiteral("title"), QStringLiteral("编辑测试")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                conv = data.value(QStringLiteral("conv")).toMap();
+                convDone = true;
+              });
+  QVERIFY(waitFor([&] { return convDone; }));
+  const QString convId = conv.value(QStringLiteral("id")).toString();
+
+  QString msgId;
+  bool sendDone = false;
+  client.send(QStringLiteral("message.send"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("client_msg_id"), QStringLiteral("qt-edit-1")},
+                          {QStringLiteral("content"),
+                           QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                                   {QStringLiteral("text"), QStringLiteral("原文")}}}}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                msgId = data.value(QStringLiteral("message_id")).toString();
+                sendDone = true;
+              });
+  QVERIFY(waitFor([&] { return sendDone; }));
+
+  bool editDone = false;
+  client.send(QStringLiteral("message.edit"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("message_id"), msgId},
+                          {QStringLiteral("content"),
+                           QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                                   {QStringLiteral("text"), QStringLiteral("改过的")}}}}},
+              [&](bool ok, const QVariantMap&, const WireError&) {
+                QVERIFY(ok);
+                editDone = true;
+              });
+  QVERIFY(waitFor([&] { return editDone; }));
+
+  QVariantMap history;
+  bool histDone = false;
+  client.send(QStringLiteral("history.fetch"),
+              QVariantMap{{QStringLiteral("conv_id"), convId}, {QStringLiteral("limit"), 10}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                history = data;
+                histDone = true;
+              });
+  QVERIFY(waitFor([&] { return histDone; }));
+
+  const QVariantList messages = history.value(QStringLiteral("messages")).toList();
+  for (const QVariant& m : messages) {
+    const QVariantMap msg = m.toMap();
+    if (msg.value(QStringLiteral("id")).toString() != msgId) continue;
+    const QVariantList content = msg.value(QStringLiteral("content")).toList();
+    QCOMPARE(content.at(0).toMap().value(QStringLiteral("text")).toString(), QStringLiteral("改过的"));
+    QVERIFY(!msg.value(QStringLiteral("edited_at")).isNull());
+    return;
+  }
+  QVERIFY2(false, "没找到消息");
+}
+
+void TestE2E::pinsMessage() {
+  AuthResult auth;
+  Client client;
+  QVERIFY(registerAndConnect(auth, client, QStringLiteral("qt_pin")));
+
+  QVariantMap conv;
+  bool convDone = false;
+  client.send(QStringLiteral("conv.create"),
+              QVariantMap{{QStringLiteral("kind"), QStringLiteral("group")},
+                          {QStringLiteral("title"), QStringLiteral("置顶测试")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                conv = data.value(QStringLiteral("conv")).toMap();
+                convDone = true;
+              });
+  QVERIFY(waitFor([&] { return convDone; }));
+  const QString convId = conv.value(QStringLiteral("id")).toString();
+
+  QString msgId;
+  bool sendDone = false;
+  client.send(QStringLiteral("message.send"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("client_msg_id"), QStringLiteral("qt-pin-1")},
+                          {QStringLiteral("content"),
+                           QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                                   {QStringLiteral("text"), QStringLiteral("这条置顶")}}}}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                msgId = data.value(QStringLiteral("message_id")).toString();
+                sendDone = true;
+              });
+  QVERIFY(waitFor([&] { return sendDone; }));
+
+  // 建群者就是 owner，有置顶权限
+  bool pinDone = false;
+  client.send(QStringLiteral("message.pin"),
+              QVariantMap{{QStringLiteral("conv_id"), convId}, {QStringLiteral("message_id"), msgId}},
+              [&](bool ok, const QVariantMap&, const WireError&) {
+                QVERIFY(ok);
+                pinDone = true;
+              });
+  QVERIFY(waitFor([&] { return pinDone; }));
+
+  QVariantMap convGet;
+  bool getDone = false;
+  client.send(QStringLiteral("conv.get"), QVariantMap{{QStringLiteral("conv_id"), convId}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                convGet = data;
+                getDone = true;
+              });
+  QVERIFY(waitFor([&] { return getDone; }));
+  QCOMPARE(convGet.value(QStringLiteral("conv")).toMap()
+               .value(QStringLiteral("pinned_message_id")).toString(),
+           msgId);
+}
+
+void TestE2E::forwardsMessage() {
+  AuthResult auth;
+  Client client;
+  QVERIFY(registerAndConnect(auth, client, QStringLiteral("qt_fwd")));
+
+  // 两个群
+  QVariantMap convA;
+  bool aDone = false;
+  client.send(QStringLiteral("conv.create"),
+              QVariantMap{{QStringLiteral("kind"), QStringLiteral("group")},
+                          {QStringLiteral("title"), QStringLiteral("群A")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                convA = data.value(QStringLiteral("conv")).toMap();
+                aDone = true;
+              });
+  QVERIFY(waitFor([&] { return aDone; }));
+
+  QVariantMap convB;
+  bool bDone = false;
+  client.send(QStringLiteral("conv.create"),
+              QVariantMap{{QStringLiteral("kind"), QStringLiteral("group")},
+                          {QStringLiteral("title"), QStringLiteral("群B")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                convB = data.value(QStringLiteral("conv")).toMap();
+                bDone = true;
+              });
+  QVERIFY(waitFor([&] { return bDone; }));
+
+  QString msgId;
+  bool sendDone = false;
+  client.send(QStringLiteral("message.send"),
+              QVariantMap{{QStringLiteral("conv_id"), convA.value(QStringLiteral("id")).toString()},
+                          {QStringLiteral("client_msg_id"), QStringLiteral("qt-fwd-1")},
+                          {QStringLiteral("content"),
+                           QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                                   {QStringLiteral("text"), QStringLiteral("转发我")}}}}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                msgId = data.value(QStringLiteral("message_id")).toString();
+                sendDone = true;
+              });
+  QVERIFY(waitFor([&] { return sendDone; }));
+
+  bool fwdDone = false;
+  client.send(QStringLiteral("message.forward"),
+              QVariantMap{{QStringLiteral("conv_id"), convB.value(QStringLiteral("id")).toString()},
+                          {QStringLiteral("from_conv_id"), convA.value(QStringLiteral("id")).toString()},
+                          {QStringLiteral("message_id"), msgId}},
+              [&](bool ok, const QVariantMap&, const WireError&) {
+                QVERIFY(ok);
+                fwdDone = true;
+              });
+  QVERIFY(waitFor([&] { return fwdDone; }));
+
+  QVariantMap history;
+  bool histDone = false;
+  client.send(QStringLiteral("history.fetch"),
+              QVariantMap{{QStringLiteral("conv_id"), convB.value(QStringLiteral("id")).toString()},
+                          {QStringLiteral("limit"), 10}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                history = data;
+                histDone = true;
+              });
+  QVERIFY(waitFor([&] { return histDone; }));
+
+  const QVariantList messages = history.value(QStringLiteral("messages")).toList();
+  for (const QVariant& m : messages) {
+    const QVariantMap msg = m.toMap();
+    const QVariantList content = msg.value(QStringLiteral("content")).toList();
+    if (content.size() > 0 &&
+        content.at(0).toMap().value(QStringLiteral("text")).toString() == QStringLiteral("转发我")) {
+      return;  // 找到了，转发成功
+    }
+  }
+  QVERIFY2(false, "转发的内容没出现在目标群历史里");
 }
 
 QTEST_GUILESS_MAIN(TestE2E)

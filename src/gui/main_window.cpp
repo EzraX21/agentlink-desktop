@@ -6,6 +6,7 @@
 #include <QDialog>
 #include <QFile>
 #include <QFileDialog>
+#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenu>
@@ -62,9 +63,14 @@ MainWindow::MainWindow(Client* client, AuthApi* api, SettingsStore* settings, QW
   connect(chat_, &ChatWindow::sendRequested, this, &MainWindow::onSendRequested);
   connect(chat_, &ChatWindow::attachmentRequested, this, &MainWindow::onAttachmentRequested);
   connect(chat_, &ChatWindow::revokeRequested, this, &MainWindow::onRevokeRequested);
+  connect(chat_, &ChatWindow::editRequested, this, &MainWindow::onEditRequested);
+  connect(chat_, &ChatWindow::forwardRequested, this, &MainWindow::onForwardRequested);
+  connect(chat_, &ChatWindow::pinRequested, this, &MainWindow::onPinRequested);
+  connect(chat_, &ChatWindow::reactionRequested, this, &MainWindow::onReactionRequested);
   connect(chat_, &ChatWindow::interruptRequested, this, &MainWindow::onInterruptRequested);
   connect(chat_, &ChatWindow::imageRequested, this, &MainWindow::onImageRequested);
   connect(chat_, &ChatWindow::fileRequested, this, &MainWindow::onFileRequested);
+  connect(chat_, &ChatWindow::typing, this, &MainWindow::onInputTextChanged);
   connect(searchPanel_, &SearchPanel::resultClicked, this, &MainWindow::onJumpToMessage);
 
   connect(client_, &Client::stateChanged, this, &MainWindow::onStateChanged);
@@ -146,7 +152,13 @@ void MainWindow::onStateChanged(int state, const QString& detail) {
 
 void MainWindow::onEvent(const QString& type, const QVariantMap& data) {
   if (type == QStringLiteral("message.new")) {
-    chat_->appendMessage(data.value(QStringLiteral("message")).toMap());
+    const QVariantMap message = data.value(QStringLiteral("message")).toMap();
+    chat_->appendMessage(message);
+    // 正在看这个会话 → 顺手标记已读（读的是消息自己的 seq）
+    if (message.value(QStringLiteral("conv_id")).toString() == chat_->conversationId()) {
+      const qint64 seq = static_cast<qint64>(message.value(QStringLiteral("seq")).toDouble());
+      if (seq > 0) reportRead(seq);
+    }
     QTimer::singleShot(0, this, &MainWindow::refreshConversations);
     return;
   }
@@ -157,7 +169,12 @@ void MainWindow::onEvent(const QString& type, const QVariantMap& data) {
     return;
   }
   if (type == QStringLiteral("message.final")) {
-    chat_->applyMessageFinal(data.value(QStringLiteral("message")).toMap());
+    const QVariantMap message = data.value(QStringLiteral("message")).toMap();
+    chat_->applyMessageFinal(message);
+    if (message.value(QStringLiteral("conv_id")).toString() == chat_->conversationId()) {
+      const qint64 seq = static_cast<qint64>(message.value(QStringLiteral("seq")).toDouble());
+      if (seq > 0) reportRead(seq);
+    }
     return;
   }
   if (type == QStringLiteral("message.revoke")) {
@@ -167,6 +184,26 @@ void MainWindow::onEvent(const QString& type, const QVariantMap& data) {
   }
   if (type == QStringLiteral("message.edit")) {
     chat_->applyMessageEdit(data.value(QStringLiteral("message")).toMap());
+    return;
+  }
+  if (type == QStringLiteral("message.reaction")) {
+    chat_->applyReaction(data.value(QStringLiteral("conv_id")).toString(),
+                         data.value(QStringLiteral("message_id")).toString(),
+                         data.value(QStringLiteral("reactions")).toList());
+    return;
+  }
+  if (type == QStringLiteral("typing")) {
+    chat_->showTyping(data.value(QStringLiteral("conv_id")).toString(),
+                      data.value(QStringLiteral("user_id")).toString(),
+                      data.value(QStringLiteral("display_name")).toString());
+    return;
+  }
+  if (type == QStringLiteral("message.pin")) {
+    // 置顶变了：重拉会话列表（pinned_message_id 在会话对象上）。
+    QTimer::singleShot(0, this, &MainWindow::refreshConversations);
+    if (chat_->conversationId() == data.value(QStringLiteral("conv_id")).toString()) {
+      chat_->setStatus(QStringLiteral("置顶已更新"));
+    }
     return;
   }
   if (type == QStringLiteral("conv.update") || type == QStringLiteral("group.update")) {
@@ -196,6 +233,18 @@ void MainWindow::onConversationSelected(const QString& convId) {
                   convTitle_ = conv.value(QStringLiteral("title")).toString();
                   convAnnouncement_ = conv.value(QStringLiteral("announcement")).toString();
                   members_ = data.value(QStringLiteral("members")).toList();
+
+                  // 我的角色决定能不能置顶 / 编辑群信息
+                  const QString selfId = client_->selfId();
+                  bool isAdmin = false;
+                  for (const QVariant& m : members_) {
+                    const QVariantMap member = m.toMap();
+                    if (member.value(QStringLiteral("user_id")).toString() == selfId) {
+                      const QString role = member.value(QStringLiteral("role")).toString();
+                      isAdmin = role == QStringLiteral("owner") || role == QStringLiteral("admin");
+                    }
+                  }
+                  chat_->setCanPin(isAdmin);
                   chat_->openConversation(convId, convTitle_);
                 });
 }
@@ -447,6 +496,128 @@ void MainWindow::onJumpToMessage(const QString& convId, const QString& messageId
   }
   Q_UNUSED(messageId)
   Q_UNUSED(seq)
+}
+
+void MainWindow::onEditRequested(const QString& messageId) {
+  const QString convId = chat_->conversationId();
+  if (convId.isEmpty()) return;
+
+  // 拿到原文再改（编辑对话框要预填）
+  bool ok = false;
+  const QString newText = QInputDialog::getMultiLineText(
+      this, QStringLiteral("编辑消息"), QStringLiteral("新内容"), QString(), &ok);
+  if (!ok || newText.trimmed().isEmpty()) return;
+
+  client_->send(QStringLiteral("message.edit"),
+                QVariantMap{{QStringLiteral("conv_id"), convId},
+                            {QStringLiteral("message_id"), messageId},
+                            {QStringLiteral("content"),
+                             QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                                     {QStringLiteral("text"), newText}}}}},
+                [this](bool ok2, const QVariantMap&, const WireError& error) {
+                  if (!ok2) {
+                    chat_->setStatus(QStringLiteral("编辑失败：%1").arg(error.message), true);
+                  }
+                });
+}
+
+void MainWindow::onForwardRequested(const QString& messageId) {
+  forwardMessage(messageId);
+}
+
+void MainWindow::forwardMessage(const QString& messageId) {
+  const QString fromConvId = chat_->conversationId();
+  if (fromConvId.isEmpty()) return;
+
+  client_->send(QStringLiteral("conv.list"), QVariantMap(),
+                [this, messageId, fromConvId](bool ok, const QVariantMap& data, const WireError& error) {
+                  if (!ok) {
+                    chat_->setStatus(QStringLiteral("取会话列表失败：%1").arg(error.message), true);
+                    return;
+                  }
+                  QStringList titles;
+                  QStringList ids;
+                  const QVariantList items = data.value(QStringLiteral("items")).toList();
+                  for (const QVariant& it : items) {
+                    const QVariantMap conv = it.toMap();
+                    ids << conv.value(QStringLiteral("id")).toString();
+                    titles << conv.value(QStringLiteral("title")).toString();
+                  }
+                  if (ids.isEmpty()) {
+                    chat_->setStatus(QStringLiteral("没有可转发到的会话"), true);
+                    return;
+                  }
+
+                  bool pickedOk = false;
+                  const QString picked = QInputDialog::getItem(
+                      this, QStringLiteral("转发"), QStringLiteral("转发到哪个会话？"),
+                      titles, 0, false, &pickedOk);
+                  if (!pickedOk) return;
+                  const int idx = titles.indexOf(picked);
+                  if (idx < 0) return;
+                  const QString targetId = ids.at(idx);
+
+                  client_->send(QStringLiteral("message.forward"),
+                                QVariantMap{{QStringLiteral("conv_id"), targetId},
+                                            {QStringLiteral("from_conv_id"), fromConvId},
+                                            {QStringLiteral("message_id"), messageId}},
+                                [this](bool ok2, const QVariantMap&, const WireError& err) {
+                                  if (!ok2) {
+                                    chat_->setStatus(QStringLiteral("转发失败：%1").arg(err.message), true);
+                                  } else {
+                                    chat_->setStatus(QStringLiteral("已转发"));
+                                  }
+                                });
+                });
+}
+
+void MainWindow::onPinRequested(const QString& messageId) {
+  const QString convId = chat_->conversationId();
+  if (convId.isEmpty()) return;
+  client_->send(QStringLiteral("message.pin"),
+                QVariantMap{{QStringLiteral("conv_id"), convId},
+                            {QStringLiteral("message_id"), messageId}},
+                [this](bool ok, const QVariantMap&, const WireError& error) {
+                  if (!ok) {
+                    chat_->setStatus(QStringLiteral("置顶失败：%1").arg(error.message), true);
+                  } else {
+                    chat_->setStatus(QStringLiteral("已置顶"));
+                  }
+                });
+}
+
+void MainWindow::onReactionRequested(const QString& messageId, const QString& emoji, bool remove) {
+  const QString convId = chat_->conversationId();
+  if (convId.isEmpty()) return;
+  client_->send(remove ? QStringLiteral("reaction.remove") : QStringLiteral("reaction.add"),
+                QVariantMap{{QStringLiteral("conv_id"), convId},
+                            {QStringLiteral("message_id"), messageId},
+                            {QStringLiteral("emoji"), emoji}},
+                [this](bool ok, const QVariantMap&, const WireError& error) {
+                  if (!ok) {
+                    chat_->setStatus(QStringLiteral("回应失败：%1").arg(error.message), true);
+                  }
+                });
+}
+
+void MainWindow::onInputTextChanged() {
+  // 节流：服务端 TYPING_THROTTLE_MS = 2000，客户端也按 2 秒窗口报一次。
+  const qint64 now = QDateTime::currentMSecsSinceEpoch();
+  if (now - lastTypingSent_ < 2000) return;
+  const QString convId = chat_->conversationId();
+  if (convId.isEmpty()) return;
+  lastTypingSent_ = now;
+  client_->send(QStringLiteral("typing.send"), QVariantMap{{QStringLiteral("conv_id"), convId}},
+                [](bool, const QVariantMap&, const WireError&) {});
+}
+
+void MainWindow::reportRead(qint64 lastSeq) {
+  const QString convId = chat_->conversationId();
+  if (convId.isEmpty() || lastSeq <= 0) return;
+  // 已读水位：只报当前会话看到的最后一条终态消息的 seq。服务端只增不减，重复上报安全。
+  client_->send(QStringLiteral("read.set"),
+                QVariantMap{{QStringLiteral("conv_id"), convId}, {QStringLiteral("last_seq"), lastSeq}},
+                [](bool, const QVariantMap&, const WireError&) {});
 }
 
 void MainWindow::requireLogin() {

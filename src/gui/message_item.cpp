@@ -1,6 +1,7 @@
 #include "message_item.hpp"
 
 #include <QAction>
+#include <QBoxLayout>
 #include <QClipboard>
 #include <QContextMenuEvent>
 #include <QDateTime>
@@ -15,13 +16,15 @@
 #include <QPushButton>
 #include <QStandardPaths>
 #include <QVBoxLayout>
-
 #include "core/auth_api.hpp"
 
 namespace agentlink {
 namespace {
 
 constexpr int kInlineMaxWidth = 320;  ///< 内联图片最大宽度（px），保持聊天流紧凑。
+
+/// 预设表情（右键「回应」菜单与「＋」按钮共用的那一排）。
+const char* const kReactionEmojis[] = {"👍", "❤️", "😂", "😮", "😢"};
 
 QString timeText(qint64 ms) {
   const QDateTime dt = QDateTime::fromMSecsSinceEpoch(ms);
@@ -79,6 +82,9 @@ MessageItem::MessageItem(AuthApi* api, std::function<QString()> token, QWidget* 
   contentBox_ = new QWidget(this);
   outer->addWidget(contentBox_);
 
+  reactionsBox_ = new QWidget(this);
+  outer->addWidget(reactionsBox_);
+
   streamingLabel_ = new QLabel(this);
   streamingLabel_->setObjectName(QStringLiteral("streamingText"));
   streamingLabel_->setWordWrap(true);
@@ -102,6 +108,7 @@ void MessageItem::setMessage(const QVariantMap& message, bool isSelf) {
   messageId_ = message.value(QStringLiteral("id")).toString();
   const QVariantMap sender = message.value(QStringLiteral("sender")).toMap();
   senderId_ = sender.value(QStringLiteral("id")).toString();
+  reactions_ = message.value(QStringLiteral("reactions")).toList();
   rebuild();
 }
 
@@ -109,6 +116,81 @@ void MessageItem::markRevoked() {
   message_.insert(QStringLiteral("revoked_at"),
                   static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
   rebuild();
+}
+
+void MessageItem::setReactions(const QVariantList& reactions) {
+  reactions_ = reactions;
+  rebuildReactions();
+}
+
+bool MessageItem::mineReaction(const QString& emoji) const {
+  for (const QVariant& r : reactions_) {
+    const QVariantMap reaction = r.toMap();
+    if (reaction.value(QStringLiteral("emoji")).toString() == emoji) {
+      const QVariantList userIds = reaction.value(QStringLiteral("user_ids")).toList();
+      for (const QVariant& id : userIds) {
+        if (id.toString() == selfId_) return true;
+      }
+    }
+  }
+  return false;
+}
+
+void MessageItem::rebuildReactions() {
+  // 清空旧的回应条
+  if (reactionsBox_->layout() != nullptr) {
+    QLayoutItem* item;
+    while ((item = reactionsBox_->layout()->takeAt(0)) != nullptr) {
+      if (item->widget() != nullptr) item->widget()->deleteLater();
+      delete item;
+    }
+  } else {
+    new QHBoxLayout(reactionsBox_);
+  }
+  auto* layout = static_cast<QBoxLayout*>(reactionsBox_->layout());
+  layout->setContentsMargins(0, 0, 0, 0);
+  layout->setSpacing(4);
+
+  bool any = false;
+  for (const QVariant& r : reactions_) {
+    const QVariantMap reaction = r.toMap();
+    const QString emoji = reaction.value(QStringLiteral("emoji")).toString();
+    const int count = reaction.value(QStringLiteral("user_ids")).toList().size();
+    if (emoji.isEmpty()) continue;
+
+    const bool mine = mineReaction(emoji);
+    auto* chip = new QPushButton(
+        QStringLiteral("%1 %2").arg(emoji).arg(count), reactionsBox_);
+    chip->setCursor(Qt::PointingHandCursor);
+    chip->setToolTip(mine ? QStringLiteral("点击取消") : QStringLiteral("点击回应"));
+    chip->setStyleSheet(mine ? QStringLiteral("background:#dbe7ff;") : QString());
+    connect(chip, &QPushButton::clicked, this, [this, emoji, mine]() {
+      emit reactionRequested(messageId_, emoji, mine);
+    });
+    layout->addWidget(chip);
+    any = true;
+  }
+  Q_UNUSED(any)
+
+  // 「＋」按钮：加一个预设表情（没有回应时也显示，让用户能回应）
+  auto* addButton = new QPushButton(QStringLiteral("＋"), reactionsBox_);
+  addButton->setFixedWidth(28);
+  addButton->setToolTip(QStringLiteral("回应"));
+  connect(addButton, &QPushButton::clicked, this, [this, addButton]() {
+    QMenu menu(this);
+    for (const char* e : kReactionEmojis) {
+      const QString emoji = QString::fromUtf8(e);
+      QAction* action = menu.addAction(emoji);
+      QObject::connect(action, &QAction::triggered, this, [this, emoji]() {
+        emit reactionRequested(messageId_, emoji, false);
+      });
+    }
+    menu.exec(addButton->mapToGlobal(QPoint(0, addButton->height())));
+  });
+  layout->addWidget(addButton);
+  layout->addStretch(1);
+
+  reactionsBox_->setVisible(true);
 }
 
 void MessageItem::updateStreaming(const QString& text, bool streaming) {
@@ -150,7 +232,6 @@ void MessageItem::rebuild() {
   statusLabel_->setText(status);
   statusLabel_->setVisible(!status.isEmpty());
 
-  // 引用：reply_to 存在时，用解析器拿被引用消息的正文（拿不到就只显示"回复"）。
   const QString replyTo = message_.value(QStringLiteral("reply_to")).toString();
   if (!replyTo.isEmpty() && quoteResolver_) {
     const QString quoted = quoteResolver_(replyTo);
@@ -160,7 +241,6 @@ void MessageItem::rebuild() {
     quoteLabel_->setVisible(false);
   }
 
-  // 正文
   if (revoked) {
     auto* revokedLabel = new QLabel(QStringLiteral("这条消息已被撤回"), contentBox_);
     revokedLabel->setObjectName(QStringLiteral("revokedText"));
@@ -180,7 +260,10 @@ void MessageItem::rebuild() {
     }
   }
 
-  // 流式状态
+  // 表情回应
+  reactions_ = message_.value(QStringLiteral("reactions")).toList();
+  rebuildReactions();
+
   updateStreaming(QString(), false);
   if (streaming) {
     QString acc;
@@ -222,7 +305,6 @@ void MessageItem::addFileBlock(const QVariantMap& block) {
   label->setToolTip(QStringLiteral("点击下载并打开"));
   label->setOnClick([this, attachmentId, filename]() { emit fileClicked(attachmentId, filename); });
 
-  // 视频文件：尝试拉服务端抽的帧当预览；不是视频（404）就保持 📎。
   loadThumbnailInto(label, attachmentId, filename);
 
   contentBox_->layout()->addWidget(label);
@@ -235,16 +317,12 @@ void MessageItem::loadImageInto(QLabel* label, const QString& attachmentId) {
     return;
   }
 
-  // 下载到临时目录 → 载入 QPixmap → 立刻删临时文件（pixmap 已经解进内存）。
-  // 用固定临时目录而不是 QTemporaryDir：下载是异步的，临时目录要活到回调。
   const QString tmpDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
   const QString dest = tmpDir + QStringLiteral("/agentlink-img-") +
                        attachmentId.mid(0, 8) + QStringLiteral(".bin");
 
   api_->downloadAttachment(token, attachmentId, QStringLiteral("image"), dest,
                            [label, dest](bool ok, const QString&) {
-                             // 回调是异步的：切会话后 label 可能已被销毁。
-                             // 用 QPointer 自动置空，避免写野指针。
                              QPointer<QLabel> guard(label);
                              if (guard.isNull()) return;
                              QPixmap pix;
@@ -285,6 +363,33 @@ void MessageItem::contextMenuEvent(QContextMenuEvent* event) {
 
   QAction* replyAction = menu.addAction(QStringLiteral("回复"));
   QAction* copyAction = menu.addAction(QStringLiteral("复制"));
+
+  // 回应子菜单
+  QMenu* reactMenu = menu.addMenu(QStringLiteral("回应"));
+  for (const char* e : kReactionEmojis) {
+    const QString emoji = QString::fromUtf8(e);
+    QAction* action = reactMenu->addAction(emoji);
+    QObject::connect(action, &QAction::triggered, this, [this, emoji]() {
+      emit reactionRequested(messageId_, emoji, mineReaction(emoji));
+    });
+  }
+
+  QAction* editAction = nullptr;
+  QAction* forwardAction = nullptr;
+  QAction* pinAction = nullptr;
+  if (!message_.value(QStringLiteral("revoked_at")).isNull()) {
+    // 已撤回：除了复制什么都别做
+  } else {
+    if (isSelf_) {
+      menu.addSeparator();
+      editAction = menu.addAction(QStringLiteral("编辑"));
+    }
+    forwardAction = menu.addAction(QStringLiteral("转发"));
+    if (canPin_) {
+      pinAction = menu.addAction(QStringLiteral("置顶"));
+    }
+  }
+
   QAction* revokeAction = nullptr;
   if (isSelf_) {
     menu.addSeparator();
@@ -306,6 +411,12 @@ void MessageItem::contextMenuEvent(QContextMenuEvent* event) {
     if (!text.isEmpty()) {
       QGuiApplication::clipboard()->setText(text);
     }
+  } else if (editAction != nullptr && chosen == editAction) {
+    emit editRequested(messageId_);
+  } else if (forwardAction != nullptr && chosen == forwardAction) {
+    emit forwardRequested(messageId_);
+  } else if (pinAction != nullptr && chosen == pinAction) {
+    emit pinRequested(messageId_);
   } else if (revokeAction != nullptr && chosen == revokeAction) {
     emit revokeRequested(messageId_);
   }

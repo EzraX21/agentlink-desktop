@@ -42,6 +42,9 @@ class ChatWindow : public QWidget {
   /// 自己的 id（用来判断"这条是不是我发的"）。
   void setSelfId(const QString& id) { selfId_ = id; }
 
+  /// 自己在这个会话里能不能置顶（群主/管理员）。
+  void setCanPin(bool can) { canPin_ = can; }
+
   /// 收到 message.new：插入一条。
   void appendMessage(const QVariantMap& message);
 
@@ -60,6 +63,12 @@ class ChatWindow : public QWidget {
   /// 收到 message.edit：原地替换正文。
   void applyMessageEdit(const QVariantMap& message);
 
+  /// 收到 message.reaction：全量替换某条消息的回应。
+  void applyReaction(const QString& convId, const QString& messageId, const QVariantList& reactions);
+
+  /// 收到 typing：在某条状态条上显示"xxx 正在输入"几秒。
+  void showTyping(const QString& convId, const QString& userId, const QString& displayName);
+
   /// 设置连接状态提示。
   void setStatus(const QString& text, bool isError = false);
 
@@ -74,12 +83,22 @@ class ChatWindow : public QWidget {
   void attachmentRequested();
   /// 右键撤回。
   void revokeRequested(const QString& messageId);
+  /// 右键编辑。
+  void editRequested(const QString& messageId);
+  /// 右键转发。
+  void forwardRequested(const QString& messageId);
+  /// 右键置顶。
+  void pinRequested(const QString& messageId);
+  /// 点表情回应（remove=true 表示取消）。
+  void reactionRequested(const QString& messageId, const QString& emoji, bool remove);
   /// 打断 AI 流式。
   void interruptRequested(const QString& messageId);
   /// 点开图片看大图。
   void imageRequested(const QString& attachmentId);
   /// 点开文件。
   void fileRequested(const QString& attachmentId, const QString& filename);
+  /// 用户正在输入（MainWindow 节流后发 typing.send）。
+  void typing();
 
  private slots:
   void onSendClicked();
@@ -110,6 +129,7 @@ class ChatWindow : public QWidget {
   QString convTitle_;
   QString selfId_;
   QString replyToId_;
+  bool canPin_ = false;
 
   /// message id → 流式累积文本（message.update 是增量，到 final 才完整）。
   QHash<QString, QString> streamAcc_;

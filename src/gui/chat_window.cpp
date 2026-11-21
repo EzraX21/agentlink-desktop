@@ -9,6 +9,7 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "core/auth_api.hpp"
@@ -87,6 +88,7 @@ ChatWindow::ChatWindow(Client* client, AuthApi* api, std::function<QString()> to
   connect(sendButton_, &QPushButton::clicked, this, &ChatWindow::onSendClicked);
   connect(attachButton_, &QPushButton::clicked, this, &ChatWindow::onAttachClicked);
   connect(input_, &QLineEdit::returnPressed, this, &ChatWindow::onReturnPressed);
+  connect(input_, &QLineEdit::textChanged, this, &ChatWindow::typing);
 }
 
 void ChatWindow::setStatus(const QString& text, bool isError) {
@@ -132,10 +134,16 @@ void ChatWindow::renderMessage(const QVariantMap& message, bool isSelf) {
 
   auto* item = new MessageItem(api_, token_, this);
   item->setQuoteResolver([this](const QString& id) { return resolveQuote(id); });
+  item->setSelfId(selfId_);
+  item->setCanPin(canPin_);
   item->setMessage(message, effectiveSelf);
 
   connect(item, &MessageItem::replyRequested, this, &ChatWindow::setReplyTo);
   connect(item, &MessageItem::revokeRequested, this, &ChatWindow::revokeRequested);
+  connect(item, &MessageItem::editRequested, this, &ChatWindow::editRequested);
+  connect(item, &MessageItem::forwardRequested, this, &ChatWindow::forwardRequested);
+  connect(item, &MessageItem::pinRequested, this, &ChatWindow::pinRequested);
+  connect(item, &MessageItem::reactionRequested, this, &ChatWindow::reactionRequested);
   connect(item, &MessageItem::interruptRequested, this, &ChatWindow::interruptRequested);
   connect(item, &MessageItem::imageClicked, this, &ChatWindow::imageRequested);
   connect(item, &MessageItem::fileClicked, this, &ChatWindow::fileRequested);
@@ -210,6 +218,28 @@ void ChatWindow::applyMessageEdit(const QVariantMap& message) {
       return;
     }
   }
+}
+
+void ChatWindow::applyReaction(const QString& convId, const QString& messageId,
+                               const QVariantList& reactions) {
+  if (convId != convId_) return;
+  for (int i = 0; i < list_->count(); ++i) {
+    auto* item = qobject_cast<MessageItem*>(list_->itemWidget(list_->item(i)));
+    if (item != nullptr && item->messageId() == messageId) {
+      item->setReactions(reactions);
+      return;
+    }
+  }
+}
+
+void ChatWindow::showTyping(const QString& convId, const QString& userId, const QString& displayName) {
+  if (convId != convId_ || userId == selfId_) return;
+  const QString name = displayName.isEmpty() ? QStringLiteral("有人") : displayName;
+  setStatus(QStringLiteral("%1 正在输入…").arg(name), false);
+  // 3 秒后自动清（服务端 TYPING_TTL_MS = 3000，客户端也按这个值过期）
+  QTimer::singleShot(3000, this, [this]() {
+    statusLabel_->setVisible(false);
+  });
 }
 
 void ChatWindow::setReplyTo(const QString& messageId) {
