@@ -45,7 +45,10 @@ const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SERVER_IMAGE = 'agentlink-server:latest';
 const DESKTOP_IMAGE = 'agentlink-desktop:latest';
 const SERVER_GIT_URL =
-  process.env.AGENTLINK_SERVER_GIT_URL ?? 'https://github.com/EzraX21/agentlink.git';
+  // 注意 #refs/heads/main：docker build 从 git URL 拉源码时**默认找 master 分支**，
+  // 而仓库默认分支是 main —— 不写 fragment 会报"无法找到远程引用 master"。
+  process.env.AGENTLINK_SERVER_GIT_URL ??
+  'https://github.com/EzraX21/agentlink.git#refs/heads/main';
 
 /** 跑一个 docker 命令并收集输出。 */
 function docker(args, opts = {}) {
