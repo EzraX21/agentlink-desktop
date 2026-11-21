@@ -30,6 +30,10 @@ class TestE2E : public QObject {
   void sendsAndReceivesMessage();
   void listsConversations();
   void uploadsAttachment();
+  void repliesWithReplyTo();
+  void revokesOwnMessage();
+  void updatesGroupInfo();
+  void searchesMessages();
 
  private:
   /// 跑一个事件循环直到 predicate 为真或超时。
@@ -47,6 +51,31 @@ class TestE2E : public QObject {
     timer.start(timeoutMs);
     loop.exec();
     return predicate();
+  }
+
+  /// 注册一个账号并连上（每个用例自给自足，不依赖别的用例的 token）。
+  bool registerAndConnect(AuthResult& auth, Client& client, const QString& prefix) {
+    AuthApi api;
+    api.setHttpBase(baseUrl_);
+    const QString username = QStringLiteral("%1_%2")
+                                 .arg(prefix)
+                                 .arg(QDateTime::currentMSecsSinceEpoch() % 100000);
+    bool done = false;
+    api.registerUser(username, prefix, QStringLiteral("qt-client-pass-1234"),
+                     [&](const AuthResult& r) {
+                       auth = r;
+                       done = true;
+                     });
+    if (!waitFor([&] { return done; }) || !auth.ok) return false;
+
+    bool ready = false;
+    client.setStateHandler([&](ConnectionState state, const QString&) {
+      if (state == ConnectionState::Ready) ready = true;
+    });
+    const auto address = ServerAddress::parse(baseUrl_);
+    if (!address.has_value()) return false;
+    client.connectTo(*address, auth.accessToken);
+    return waitFor([&] { return ready; }, 15000);
   }
 
   QString baseUrl_;
@@ -265,6 +294,227 @@ void TestE2E::uploadsAttachment() {
   QVERIFY(waitFor([&] { return uploadDone; }));
   QVERIFY(!info.value(QStringLiteral("attachment_id")).toString().isEmpty());
   QCOMPARE(info.value(QStringLiteral("filename")).toString(), QStringLiteral("hello.txt"));
+}
+
+void TestE2E::repliesWithReplyTo() {
+  AuthResult auth;
+  Client client;
+  QVERIFY(registerAndConnect(auth, client, QStringLiteral("qt_reply")));
+
+  // 建群
+  QVariantMap conv;
+  bool convDone = false;
+  client.send(QStringLiteral("conv.create"),
+              QVariantMap{{QStringLiteral("kind"), QStringLiteral("group")},
+                          {QStringLiteral("title"), QStringLiteral("回复测试")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                conv = data.value(QStringLiteral("conv")).toMap();
+                convDone = true;
+              });
+  QVERIFY(waitFor([&] { return convDone; }));
+  const QString convId = conv.value(QStringLiteral("id")).toString();
+
+  // 发第一条
+  QString firstId;
+  bool firstDone = false;
+  client.send(QStringLiteral("message.send"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("client_msg_id"), QStringLiteral("qt-reply-a")},
+                          {QStringLiteral("content"),
+                           QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                                   {QStringLiteral("text"), QStringLiteral("被回复的那条")}}}}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                firstId = data.value(QStringLiteral("message_id")).toString();
+                firstDone = true;
+              });
+  QVERIFY(waitFor([&] { return firstDone; }));
+
+  // 第二条带 reply_to
+  bool replyDone = false;
+  client.send(QStringLiteral("message.send"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("client_msg_id"), QStringLiteral("qt-reply-b")},
+                          {QStringLiteral("reply_to"), firstId},
+                          {QStringLiteral("content"),
+                           QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                                   {QStringLiteral("text"), QStringLiteral("这是一条回复")}}}}},
+              [&](bool ok, const QVariantMap&, const WireError&) {
+                QVERIFY(ok);
+                replyDone = true;
+              });
+  QVERIFY(waitFor([&] { return replyDone; }));
+
+  // 历史里第二条的 reply_to 指向第一条
+  QVariantMap history;
+  bool histDone = false;
+  client.send(QStringLiteral("history.fetch"),
+              QVariantMap{{QStringLiteral("conv_id"), convId}, {QStringLiteral("limit"), 10}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                history = data;
+                histDone = true;
+              });
+  QVERIFY(waitFor([&] { return histDone; }));
+
+  bool found = false;
+  const QVariantList messages = history.value(QStringLiteral("messages")).toList();
+  for (const QVariant& m : messages) {
+    const QVariantMap msg = m.toMap();
+    if (msg.value(QStringLiteral("id")).toString() == firstId) continue;
+    if (msg.value(QStringLiteral("reply_to")).toString() == firstId) found = true;
+  }
+  QVERIFY(found);
+}
+
+void TestE2E::revokesOwnMessage() {
+  AuthResult auth;
+  Client client;
+  QVERIFY(registerAndConnect(auth, client, QStringLiteral("qt_revoke")));
+
+  QVariantMap conv;
+  bool convDone = false;
+  client.send(QStringLiteral("conv.create"),
+              QVariantMap{{QStringLiteral("kind"), QStringLiteral("group")},
+                          {QStringLiteral("title"), QStringLiteral("撤回测试")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                conv = data.value(QStringLiteral("conv")).toMap();
+                convDone = true;
+              });
+  QVERIFY(waitFor([&] { return convDone; }));
+  const QString convId = conv.value(QStringLiteral("id")).toString();
+
+  QString sentId;
+  bool sendDone = false;
+  client.send(QStringLiteral("message.send"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("client_msg_id"), QStringLiteral("qt-revoke-1")},
+                          {QStringLiteral("content"),
+                           QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                                   {QStringLiteral("text"), QStringLiteral("这条会被撤回")}}}}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                sentId = data.value(QStringLiteral("message_id")).toString();
+                sendDone = true;
+              });
+  QVERIFY(waitFor([&] { return sendDone; }));
+
+  bool revokeDone = false;
+  client.send(QStringLiteral("message.revoke"),
+              QVariantMap{{QStringLiteral("conv_id"), convId}, {QStringLiteral("message_id"), sentId}},
+              [&](bool ok, const QVariantMap&, const WireError&) {
+                QVERIFY(ok);
+                revokeDone = true;
+              });
+  QVERIFY(waitFor([&] { return revokeDone; }));
+
+  QVariantMap history;
+  bool histDone = false;
+  client.send(QStringLiteral("history.fetch"),
+              QVariantMap{{QStringLiteral("conv_id"), convId}, {QStringLiteral("limit"), 10}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                history = data;
+                histDone = true;
+              });
+  QVERIFY(waitFor([&] { return histDone; }));
+
+  // 服务端 history.fetch 会过滤掉已撤回的消息（state='revoked' 不进列表）。
+  // 所以正确断言是：这条消息**不在**历史里了。
+  const QVariantList messages = history.value(QStringLiteral("messages")).toList();
+  for (const QVariant& m : messages) {
+    const QVariantMap msg = m.toMap();
+    QVERIFY2(msg.value(QStringLiteral("id")).toString() != sentId,
+             "撤回的消息不该出现在历史里");
+  }
+}
+
+void TestE2E::updatesGroupInfo() {
+  AuthResult auth;
+  Client client;
+  QVERIFY(registerAndConnect(auth, client, QStringLiteral("qt_groupinfo")));
+
+  QVariantMap conv;
+  bool convDone = false;
+  client.send(QStringLiteral("conv.create"),
+              QVariantMap{{QStringLiteral("kind"), QStringLiteral("group")},
+                          {QStringLiteral("title"), QStringLiteral("旧名")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                conv = data.value(QStringLiteral("conv")).toMap();
+                convDone = true;
+              });
+  QVERIFY(waitFor([&] { return convDone; }));
+  const QString convId = conv.value(QStringLiteral("id")).toString();
+
+  QVariantMap updated;
+  bool updDone = false;
+  client.send(QStringLiteral("group.update"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("title"), QStringLiteral("新名")},
+                          {QStringLiteral("announcement"), QStringLiteral("新公告")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                updated = data.value(QStringLiteral("conv")).toMap();
+                updDone = true;
+              });
+  QVERIFY(waitFor([&] { return updDone; }));
+  QCOMPARE(updated.value(QStringLiteral("title")).toString(), QStringLiteral("新名"));
+  QCOMPARE(updated.value(QStringLiteral("announcement")).toString(), QStringLiteral("新公告"));
+}
+
+void TestE2E::searchesMessages() {
+  AuthResult auth;
+  Client client;
+  QVERIFY(registerAndConnect(auth, client, QStringLiteral("qt_search")));
+
+  QVariantMap conv;
+  bool convDone = false;
+  client.send(QStringLiteral("conv.create"),
+              QVariantMap{{QStringLiteral("kind"), QStringLiteral("group")},
+                          {QStringLiteral("title"), QStringLiteral("搜索测试")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                conv = data.value(QStringLiteral("conv")).toMap();
+                convDone = true;
+              });
+  QVERIFY(waitFor([&] { return convDone; }));
+  const QString convId = conv.value(QStringLiteral("id")).toString();
+
+  const QString keyword = QStringLiteral("唯一关键词%1").arg(QDateTime::currentMSecsSinceEpoch());
+  bool sendDone = false;
+  client.send(QStringLiteral("message.send"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("client_msg_id"), QStringLiteral("qt-search-1")},
+                          {QStringLiteral("content"),
+                           QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                                   {QStringLiteral("text"), keyword}}}}},
+              [&](bool ok, const QVariantMap&, const WireError&) {
+                QVERIFY(ok);
+                sendDone = true;
+              });
+  QVERIFY(waitFor([&] { return sendDone; }));
+
+  QVariantMap result;
+  bool searchDone = false;
+  client.send(QStringLiteral("search.messages"),
+              QVariantMap{{QStringLiteral("q"), keyword}, {QStringLiteral("limit"), 10}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                result = data;
+                searchDone = true;
+              });
+  QVERIFY(waitFor([&] { return searchDone; }));
+
+  const QVariantList hits = result.value(QStringLiteral("hits")).toList();
+  bool found = false;
+  for (const QVariant& h : hits) {
+    const QVariantMap hit = h.toMap();
+    if (hit.value(QStringLiteral("conv_id")).toString() == convId) found = true;
+  }
+  QVERIFY(found);
 }
 
 QTEST_GUILESS_MAIN(TestE2E)

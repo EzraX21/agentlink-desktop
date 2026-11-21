@@ -49,12 +49,12 @@ RUN apt-get update \
       fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /build /usr/local/agentlink-desktop
-RUN ln -s /usr/local/agentlink-desktop/agentlink-qt /usr/local/bin/agentlink-qt \
- && ln -s /usr/local/agentlink-desktop/test-frames /usr/local/bin/agentlink-test-frames \
- && ln -s /usr/local/agentlink-desktop/test-address /usr/local/bin/agentlink-test-address \
- && ln -s /usr/local/agentlink-desktop/test-settings /usr/local/bin/agentlink-test-settings \
- && ln -s /usr/local/agentlink-desktop/test-e2e /usr/local/bin/agentlink-test-e2e
+COPY --from=build /build /build
+RUN ln -s /build/agentlink-qt /usr/local/bin/agentlink-qt \
+ && ln -s /build/test-frames /usr/local/bin/agentlink-test-frames \
+ && ln -s /build/test-address /usr/local/bin/agentlink-test-address \
+ && ln -s /build/test-settings /usr/local/bin/agentlink-test-settings \
+ && ln -s /build/test-e2e /usr/local/bin/agentlink-test-e2e
 
 # 有显示环境时（-e DISPLAY -v /tmp/.X11-unix）直接出界面；
 # 没有时用 --version / ctest 做无头验证。

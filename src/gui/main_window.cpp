@@ -1,21 +1,34 @@
 #include "main_window.hpp"
 
 #include <QAction>
+#include <QDateTime>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QFile>
 #include <QFileDialog>
+#include <QKeySequence>
 #include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPixmap>
+#include <QScrollArea>
 #include <QSplitter>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
+#include <QUrl>
+#include <QVBoxLayout>
 
 #include "chat_window.hpp"
 #include "conversation_list.hpp"
 #include "core/auth_api.hpp"
 #include "core/client.hpp"
 #include "core/settings.hpp"
+#include "create_group_dialog.hpp"
+#include "group_info_dialog.hpp"
 #include "onboarding.hpp"
+#include "search_panel.hpp"
 
 namespace agentlink {
 
@@ -25,19 +38,34 @@ MainWindow::MainWindow(Client* client, AuthApi* api, SettingsStore* settings, QW
   resize(1000, 700);
 
   conversations_ = new ConversationList(client_, this);
-  chat_ = new ChatWindow(client_, api_, this);
+  chat_ = new ChatWindow(
+      client_, api_,
+      // token 取值器：上传/下载/缩略图都要当前登录态。用 lambda 保证永远读最新值。
+      [this]() -> QString {
+        const ServerEntry* entry = settings_->activeEntry();
+        return entry == nullptr ? QString() : entry->accessToken;
+      },
+      this);
+  searchPanel_ = new SearchPanel(client_, this);
+  searchPanel_->hide();
 
   splitter_ = new QSplitter(Qt::Horizontal, this);
+  splitter_->addWidget(searchPanel_);
   splitter_->addWidget(conversations_);
   splitter_->addWidget(chat_);
-  splitter_->setStretchFactor(0, 1);
-  splitter_->setStretchFactor(1, 3);
+  splitter_->setStretchFactor(1, 1);
+  splitter_->setStretchFactor(2, 3);
   setCentralWidget(splitter_);
 
   connect(conversations_, &ConversationList::selectionChanged, this,
           &MainWindow::onConversationSelected);
   connect(chat_, &ChatWindow::sendRequested, this, &MainWindow::onSendRequested);
   connect(chat_, &ChatWindow::attachmentRequested, this, &MainWindow::onAttachmentRequested);
+  connect(chat_, &ChatWindow::revokeRequested, this, &MainWindow::onRevokeRequested);
+  connect(chat_, &ChatWindow::interruptRequested, this, &MainWindow::onInterruptRequested);
+  connect(chat_, &ChatWindow::imageRequested, this, &MainWindow::onImageRequested);
+  connect(chat_, &ChatWindow::fileRequested, this, &MainWindow::onFileRequested);
+  connect(searchPanel_, &SearchPanel::resultClicked, this, &MainWindow::onJumpToMessage);
 
   connect(client_, &Client::stateChanged, this, &MainWindow::onStateChanged);
   connect(client_, &Client::eventReceived, this, &MainWindow::onEvent);
@@ -45,13 +73,6 @@ MainWindow::MainWindow(Client* client, AuthApi* api, SettingsStore* settings, QW
   buildMenus();
 }
 
-/**
- * 菜单：让用户**随时**能加/换服务器。
- *
- * 这是"客户端在任意电脑上、自己手填服务器地址"的另一半 ——
- * 只在首次启动时问一次是不够的：用户可能要从公司服务器切到自己的，
- * 或者服务端换了地址。
- */
 void MainWindow::buildMenus() {
   auto* serverMenu = menuBar()->addMenu(QStringLiteral("服务器"));
 
@@ -65,14 +86,24 @@ void MainWindow::buildMenus() {
                                                ? QStringLiteral("（未连接）")
                                                : client_->address().display()));
 
+  auto* conversationMenu = menuBar()->addMenu(QStringLiteral("会话"));
+
+  auto* newGroupAction = conversationMenu->addAction(QStringLiteral("建群…"));
+  connect(newGroupAction, &QAction::triggered, this, &MainWindow::onCreateGroup);
+
+  auto* groupInfoAction = conversationMenu->addAction(QStringLiteral("群信息…"));
+  connect(groupInfoAction, &QAction::triggered, this, &MainWindow::onOpenGroupInfo);
+
+  auto* searchAction = conversationMenu->addAction(QStringLiteral("搜索消息…"));
+  searchAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+K")));
+  connect(searchAction, &QAction::triggered, this, &MainWindow::onToggleSearch);
+
   serverMenu->addSeparator();
   auto* quitAction = serverMenu->addAction(QStringLiteral("退出"));
   connect(quitAction, &QAction::triggered, this, &QWidget::close);
 }
 
 void MainWindow::promptSwitchServer() {
-  // 复用同一套引导流程：填地址 → 注册/登录。
-  // 走完之后用新地址与新 token 重连（不重启进程）。
   Onboarding onboarding(api_, settings_, this);
   if (onboarding.exec() != QDialog::Accepted) return;
 
@@ -84,7 +115,6 @@ void MainWindow::promptSwitchServer() {
   }
 
   api_->setHttpBase(address->httpBase());
-  // 先清空界面：上一个服务器的会话列表不该留在屏幕上
   conversations_->setConversations({});
   chat_->openConversation(QString(), QString());
   chat_->setStatus(QStringLiteral("正在连接 %1 …").arg(address->display()));
@@ -98,6 +128,7 @@ void MainWindow::onStateChanged(int state, const QString& detail) {
   switch (s) {
     case ConnectionState::Ready:
       statusBar()->showMessage(QStringLiteral("已连接"));
+      chat_->setSelfId(client_->selfId());
       refreshConversations();
       break;
     case ConnectionState::Connecting:
@@ -115,24 +146,27 @@ void MainWindow::onStateChanged(int state, const QString& detail) {
 
 void MainWindow::onEvent(const QString& type, const QVariantMap& data) {
   if (type == QStringLiteral("message.new")) {
-    const QVariantMap message = data.value(QStringLiteral("message")).toMap();
-    chat_->appendMessage(message);
-    // 顺手更新会话列表的顺序（最近活跃的排前面）—— 简化版：有新消息就刷新一次。
+    chat_->appendMessage(data.value(QStringLiteral("message")).toMap());
     QTimer::singleShot(0, this, &MainWindow::refreshConversations);
     return;
   }
-  if (type == QStringLiteral("message.edit")) {
-    const QVariantMap message = data.value(QStringLiteral("message")).toMap();
-    // 简单起见：重开当前会话重新渲染（v1 的编辑频率低，不值得做增量）。
-    if (!chat_->conversationId().isEmpty()) {
-      chat_->openConversation(chat_->conversationId(), convTitle_);
-    }
+  if (type == QStringLiteral("message.update")) {
+    chat_->applyStreamDelta(data.value(QStringLiteral("conv_id")).toString(),
+                            data.value(QStringLiteral("message_id")).toString(),
+                            data.value(QStringLiteral("delta")).toString());
+    return;
+  }
+  if (type == QStringLiteral("message.final")) {
+    chat_->applyMessageFinal(data.value(QStringLiteral("message")).toMap());
     return;
   }
   if (type == QStringLiteral("message.revoke")) {
-    if (!chat_->conversationId().isEmpty()) {
-      chat_->openConversation(chat_->conversationId(), convTitle_);
-    }
+    chat_->applyMessageRevoke(data.value(QStringLiteral("conv_id")).toString(),
+                              data.value(QStringLiteral("message_id")).toString());
+    return;
+  }
+  if (type == QStringLiteral("message.edit")) {
+    chat_->applyMessageEdit(data.value(QStringLiteral("message")).toMap());
     return;
   }
   if (type == QStringLiteral("conv.update") || type == QStringLiteral("group.update")) {
@@ -155,53 +189,55 @@ void MainWindow::refreshConversations() {
 
 void MainWindow::onConversationSelected(const QString& convId) {
   if (convId.isEmpty()) return;
-  // 标题从会话列表里拿
   client_->send(QStringLiteral("conv.get"), QVariantMap{{QStringLiteral("conv_id"), convId}},
                 [this, convId](bool ok, const QVariantMap& data, const WireError&) {
                   if (!ok) return;
                   const QVariantMap conv = data.value(QStringLiteral("conv")).toMap();
                   convTitle_ = conv.value(QStringLiteral("title")).toString();
+                  convAnnouncement_ = conv.value(QStringLiteral("announcement")).toString();
+                  members_ = data.value(QStringLiteral("members")).toList();
                   chat_->openConversation(convId, convTitle_);
                 });
 }
 
-void MainWindow::onSendRequested(const QString& text) {
-  sendMessage(text);
+void MainWindow::onSendRequested(const QString& text, const QString& replyToId) {
+  sendMessage(text, replyToId);
 }
 
-void MainWindow::sendMessage(const QString& text) {
+void MainWindow::sendMessage(const QString& text, const QString& replyToId) {
   const QString convId = chat_->conversationId();
   if (convId.isEmpty()) {
     chat_->setStatus(QStringLiteral("先选一个会话"), true);
     return;
   }
 
-  // 乐观回显：先显示，服务端回推同一条时再对齐。
   QVariantMap echo;
   echo.insert(QStringLiteral("conv_id"), convId);
+  echo.insert(QStringLiteral("id"), QStringLiteral("local-%1").arg(QDateTime::currentMSecsSinceEpoch()));
   echo.insert(QStringLiteral("sender"), QVariantMap{{QStringLiteral("id"), client_->selfId()},
                                                      {QStringLiteral("display_name"),
                                                       QStringLiteral("我")}});
   echo.insert(QStringLiteral("content"),
               QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
                                       {QStringLiteral("text"), text}}});
+  echo.insert(QStringLiteral("reply_to"), replyToId.isEmpty() ? QVariant() : replyToId);
   echo.insert(QStringLiteral("created_at"),
               static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
   echo.insert(QStringLiteral("revoked_at"), QVariant());
   echo.insert(QStringLiteral("edited_at"), QVariant());
+  echo.insert(QStringLiteral("state"), QStringLiteral("final"));
   chat_->appendLocalEcho(echo);
 
-  QVariantMap content;
-  content.insert(QStringLiteral("type"), QStringLiteral("text"));
-  content.insert(QStringLiteral("text"), text);
+  QVariantMap data;
+  data.insert(QStringLiteral("conv_id"), convId);
+  data.insert(QStringLiteral("client_msg_id"),
+              QStringLiteral("qt-%1").arg(QDateTime::currentMSecsSinceEpoch()));
+  data.insert(QStringLiteral("content"),
+              QVariantList{QVariantMap{{QStringLiteral("type"), QStringLiteral("text")},
+                                      {QStringLiteral("text"), text}}});
+  if (!replyToId.isEmpty()) data.insert(QStringLiteral("reply_to"), replyToId);
 
-  const QString clientMsgId =
-      QStringLiteral("qt-%1").arg(QDateTime::currentMSecsSinceEpoch());
-
-  client_->send(QStringLiteral("message.send"),
-                QVariantMap{{QStringLiteral("conv_id"), convId},
-                            {QStringLiteral("client_msg_id"), clientMsgId},
-                            {QStringLiteral("content"), QVariantList{content}}},
+  client_->send(QStringLiteral("message.send"), data,
                 [this](bool ok, const QVariantMap&, const WireError& error) {
                   if (!ok) {
                     chat_->setStatus(QStringLiteral("发送失败：%1").arg(error.message), true);
@@ -252,6 +288,165 @@ void MainWindow::sendAttachment(const QString& filePath) {
                     }
                   });
   });
+}
+
+void MainWindow::onRevokeRequested(const QString& messageId) {
+  const QString convId = chat_->conversationId();
+  if (convId.isEmpty()) return;
+  client_->send(QStringLiteral("message.revoke"),
+                QVariantMap{{QStringLiteral("conv_id"), convId},
+                            {QStringLiteral("message_id"), messageId}},
+                [this](bool ok, const QVariantMap&, const WireError& error) {
+                  if (!ok) {
+                    chat_->setStatus(QStringLiteral("撤回失败：%1").arg(error.message), true);
+                  }
+                });
+}
+
+void MainWindow::onInterruptRequested(const QString& messageId) {
+  const QString convId = chat_->conversationId();
+  if (convId.isEmpty()) return;
+  client_->send(QStringLiteral("stream.interrupt"),
+                QVariantMap{{QStringLiteral("conv_id"), convId},
+                            {QStringLiteral("message_id"), messageId}},
+                [this](bool ok, const QVariantMap&, const WireError& error) {
+                  if (!ok) {
+                    chat_->setStatus(QStringLiteral("打断失败：%1").arg(error.message), true);
+                  }
+                });
+}
+
+void MainWindow::onImageRequested(const QString& attachmentId) {
+  const ServerEntry* entry = settings_->activeEntry();
+  const QString token = entry == nullptr ? QString() : entry->accessToken;
+  if (token.isEmpty()) return;
+
+  const QString tmpDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+  const QString dest = tmpDir + QStringLiteral("/agentlink-full-") + attachmentId.mid(0, 8) + QStringLiteral(".bin");
+
+  api_->downloadAttachment(token, attachmentId, QStringLiteral("image"), dest,
+                           [this, dest](bool ok, const QString&) {
+                             if (!ok) {
+                               chat_->setStatus(QStringLiteral("图片加载失败"), true);
+                               return;
+                             }
+                             QPixmap pix(dest);
+                             QFile::remove(dest);
+                             if (pix.isNull()) {
+                               chat_->setStatus(QStringLiteral("图片加载失败"), true);
+                               return;
+                             }
+
+                             auto* dialog = new QDialog(this);
+                             dialog->setAttribute(Qt::WA_DeleteOnClose);
+                             dialog->setWindowTitle(QStringLiteral("查看图片"));
+                             dialog->resize(720, 560);
+                             auto* layout = new QVBoxLayout(dialog);
+                             auto* area = new QScrollArea(dialog);
+                             auto* label = new QLabel(area);
+                             label->setPixmap(pix.scaled(680, 680, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                             label->setAlignment(Qt::AlignCenter);
+                             area->setWidget(label);
+                             area->setWidgetResizable(true);
+                             layout->addWidget(area);
+                             dialog->show();
+                           });
+}
+
+void MainWindow::onFileRequested(const QString& attachmentId, const QString& filename) {
+  const ServerEntry* entry = settings_->activeEntry();
+  const QString token = entry == nullptr ? QString() : entry->accessToken;
+  if (token.isEmpty()) return;
+
+  const QString name = filename.isEmpty() ? attachmentId : filename;
+  const QString tmpDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+  const QString dest = tmpDir + QStringLiteral("/") + name;
+
+  api_->downloadAttachment(token, attachmentId, name, dest,
+                           [this, dest, name](bool ok, const QString&) {
+                             if (!ok) {
+                               chat_->setStatus(QStringLiteral("下载失败"), true);
+                               return;
+                             }
+                             QDesktopServices::openUrl(QUrl::fromLocalFile(dest));
+                             chat_->setStatus(QStringLiteral("已打开 %1").arg(name));
+                           });
+}
+
+void MainWindow::onCreateGroup() {
+  CreateGroupDialog dialog(this);
+  if (dialog.exec() != QDialog::Accepted) return;
+
+  QVariantMap data;
+  data.insert(QStringLiteral("kind"), QStringLiteral("group"));
+  const QString title = dialog.title();
+  if (!title.isEmpty()) data.insert(QStringLiteral("title"), title);
+  const QStringList memberIds = dialog.memberIds();
+  if (!memberIds.isEmpty()) data.insert(QStringLiteral("member_ids"), memberIds);
+
+  client_->send(QStringLiteral("conv.create"), data,
+                [this](bool ok, const QVariantMap& res, const WireError& error) {
+                  if (!ok) {
+                    chat_->setStatus(QStringLiteral("建群失败：%1").arg(error.message), true);
+                    return;
+                  }
+                  const QVariantMap conv = res.value(QStringLiteral("conv")).toMap();
+                  const QString convId = conv.value(QStringLiteral("id")).toString();
+                  convTitle_ = conv.value(QStringLiteral("title")).toString();
+                  chat_->openConversation(convId, convTitle_);
+                  refreshConversations();
+                });
+}
+
+void MainWindow::onOpenGroupInfo() {
+  const QString convId = chat_->conversationId();
+  if (convId.isEmpty()) {
+    chat_->setStatus(QStringLiteral("先选一个会话"), true);
+    return;
+  }
+  GroupInfoDialog dialog(convTitle_, convAnnouncement_, this);
+  if (dialog.exec() != QDialog::Accepted) return;
+  saveGroupInfo(dialog.title(), dialog.announcement());
+}
+
+void MainWindow::saveGroupInfo(const QString& title, const QString& announcement) {
+  const QString convId = chat_->conversationId();
+  if (convId.isEmpty()) return;
+
+  QVariantMap data;
+  data.insert(QStringLiteral("conv_id"), convId);
+  data.insert(QStringLiteral("title"), title);
+  data.insert(QStringLiteral("announcement"), announcement);
+
+  client_->send(QStringLiteral("group.update"), data,
+                [this](bool ok, const QVariantMap& res, const WireError& error) {
+                  if (!ok) {
+                    chat_->setStatus(QStringLiteral("保存群信息失败：%1").arg(error.message), true);
+                    return;
+                  }
+                  const QVariantMap conv = res.value(QStringLiteral("conv")).toMap();
+                  convTitle_ = conv.value(QStringLiteral("title")).toString();
+                  convAnnouncement_ = conv.value(QStringLiteral("announcement")).toString();
+                  refreshConversations();
+                });
+}
+
+void MainWindow::onToggleSearch() {
+  const bool open = searchPanel_->isHidden();
+  searchPanel_->setVisible(open);
+  conversations_->setVisible(!open);
+}
+
+void MainWindow::onJumpToMessage(const QString& convId, const QString& messageId, qint64 seq) {
+  // 关搜索面板，切到目标会话
+  searchPanel_->hide();
+  conversations_->setVisible(true);
+  if (!convId.isEmpty()) {
+    convTitle_ = QString();
+    chat_->openConversation(convId, convTitle_);
+  }
+  Q_UNUSED(messageId)
+  Q_UNUSED(seq)
 }
 
 void MainWindow::requireLogin() {

@@ -41,7 +41,11 @@ if(BUILD_GUI)
     src/gui/main_window.cpp
     src/gui/onboarding.cpp
     src/gui/chat_window.cpp
+    src/gui/message_item.cpp
     src/gui/conversation_list.cpp
+    src/gui/create_group_dialog.cpp
+    src/gui/group_info_dialog.cpp
+    src/gui/search_panel.cpp
   )
   target_link_libraries(agentlink-qt PRIVATE agentlink_core Qt6::Widgets)
   target_compile_options(agentlink-qt PRIVATE -Wall -Wextra)

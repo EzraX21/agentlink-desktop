@@ -1,47 +1,40 @@
 #include "chat_window.hpp"
 
+#include <QAbstractItemView>
 #include <QDateTime>
 #include <QHBoxLayout>
-#include <QScrollBar>
+#include <QHash>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QPushButton>
-#include <QTextBrowser>
+#include <QScrollBar>
 #include <QVBoxLayout>
 
 #include "core/auth_api.hpp"
 #include "core/client.hpp"
+#include "message_item.hpp"
 
 namespace agentlink {
 namespace {
 
-/// 时间戳 → "14:32"（今天）或 "11-18 14:32"（别的日子）。
-QString formatTime(qint64 ms) {
-  const QDateTime dt = QDateTime::fromMSecsSinceEpoch(ms);
-  const QDateTime now = QDateTime::currentDateTime();
-  if (dt.date() == now.date()) {
-    return dt.toString(QStringLiteral("HH:mm"));
+/// 把消息正文里所有 text 块拼成一个纯文本（quote 预览 / 复制用）。
+QString messageText(const QVariantMap& message) {
+  QString text;
+  const QVariantList blocks = message.value(QStringLiteral("content")).toList();
+  for (const QVariant& b : blocks) {
+    const QVariantMap block = b.toMap();
+    if (block.value(QStringLiteral("type")).toString() == QStringLiteral("text")) {
+      text += block.value(QStringLiteral("text")).toString();
+    }
   }
-  return dt.toString(QStringLiteral("MM-dd HH:mm"));
-}
-
-/// 把用户输入里的危险字符转义掉。
-///
-/// 我们**不**支持富文本输入（没有加粗按钮），所以输入框里的内容一律当纯文本。
-/// 但引用的 `appendHtml` 仍会解析 HTML —— 所以必须转义，
-/// 否则用户发 `<b>hi</b>` 会变成真的加粗，发 `<script>` 更糟。
-QString escapeHtml(const QString& s) {
-  QString out = s;
-  out.replace(QStringLiteral("&"), QStringLiteral("&amp;"));
-  out.replace(QStringLiteral("<"), QStringLiteral("&lt;"));
-  out.replace(QStringLiteral(">"), QStringLiteral("&gt;"));
-  return out;
+  return text;
 }
 
 }  // namespace
 
-ChatWindow::ChatWindow(Client* client, AuthApi* api, QWidget* parent)
-    : QWidget(parent), client_(client), api_(api) {
+ChatWindow::ChatWindow(Client* client, AuthApi* api, std::function<QString()> token, QWidget* parent)
+    : QWidget(parent), client_(client), api_(api), token_(std::move(token)) {
   auto* layout = new QVBoxLayout(this);
   layout->setContentsMargins(0, 0, 0, 0);
 
@@ -50,10 +43,27 @@ ChatWindow::ChatWindow(Client* client, AuthApi* api, QWidget* parent)
   statusLabel_->setVisible(false);
   layout->addWidget(statusLabel_);
 
-  browser_ = new QTextBrowser(this);
-  browser_->setObjectName(QStringLiteral("messageBrowser"));
-  browser_->setOpenExternalLinks(false);
-  layout->addWidget(browser_, 1);
+  list_ = new QListWidget(this);
+  list_->setObjectName(QStringLiteral("messageList"));
+  list_->setSelectionMode(QAbstractItemView::NoSelection);
+  list_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+  layout->addWidget(list_, 1);
+
+  // 回复条：非空时显示"回复 xxx"，带取消按钮
+  auto* replyRow = new QWidget(this);
+  auto* replyLayout = new QHBoxLayout(replyRow);
+  replyLayout->setContentsMargins(8, 2, 8, 2);
+  replyBar_ = new QLabel(replyRow);
+  replyBar_->setObjectName(QStringLiteral("replyBar"));
+  replyBar_->setWordWrap(true);
+  replyBar_->setVisible(false);
+  replyCancelButton_ = new QPushButton(QStringLiteral("✕"), replyRow);
+  replyCancelButton_->setFixedWidth(28);
+  replyCancelButton_->setVisible(false);
+  replyLayout->addWidget(replyBar_, 1);
+  replyLayout->addWidget(replyCancelButton_);
+  layout->addWidget(replyRow);
+  connect(replyCancelButton_, &QPushButton::clicked, this, &ChatWindow::cancelReply);
 
   auto* inputRow = new QWidget(this);
   auto* inputLayout = new QHBoxLayout(inputRow);
@@ -89,7 +99,10 @@ void ChatWindow::setStatus(const QString& text, bool isError) {
 void ChatWindow::openConversation(const QString& convId, const QString& title) {
   convId_ = convId;
   convTitle_ = title;
-  browser_->clear();
+  list_->clear();
+  streamAcc_.clear();
+  textById_.clear();
+  clearReplyTo();
 
   if (client_ == nullptr || convId.isEmpty()) return;
 
@@ -105,77 +118,134 @@ void ChatWindow::openConversation(const QString& convId, const QString& title) {
                   for (int i = messages.size() - 1; i >= 0; --i) {
                     renderMessage(messages.at(i).toMap(), false);
                   }
-                  browser_->verticalScrollBar()->setValue(browser_->verticalScrollBar()->maximum());
+                  scrollToBottom();
                 });
 }
 
-QString ChatWindow::renderContent(const QVariantList& content) const {
-  QString html;
-  for (const QVariant& v : content) {
-    const QVariantMap block = v.toMap();
-    const QString type = block.value(QStringLiteral("type")).toString();
-    if (type == QStringLiteral("text")) {
-      html += escapeHtml(block.value(QStringLiteral("text")).toString());
-    } else if (type == QStringLiteral("image")) {
-      const QString name = block.value(QStringLiteral("filename")).toString();
-      html += QStringLiteral("<span style=\"color:#888\">🖼 %1</span>").arg(escapeHtml(name));
-    } else {
-      const QString name = block.value(QStringLiteral("filename")).toString();
-      html += QStringLiteral("<span style=\"color:#888\">📎 %1</span>").arg(escapeHtml(name));
-    }
-    html += QStringLiteral("<br>");
-  }
-  return html;
-}
-
 void ChatWindow::renderMessage(const QVariantMap& message, bool isSelf) {
+  const QString messageId = message.value(QStringLiteral("id")).toString();
+  if (messageId.isEmpty()) return;
+
   const QVariantMap sender = message.value(QStringLiteral("sender")).toMap();
-  const QString senderId = sender.value(QStringLiteral("id")).toString();
-  const QString senderName = sender.value(QStringLiteral("display_name")).toString();
-  const QString content = renderContent(message.value(QStringLiteral("content")).toList());
-  const qint64 createdAt =
-      static_cast<qint64>(message.value(QStringLiteral("created_at")).toDouble());
-  const bool revoked = !message.value(QStringLiteral("revoked_at")).isNull();
-  const bool edited = !message.value(QStringLiteral("edited_at")).isNull();
+  const bool self = sender.value(QStringLiteral("id")).toString() == selfId_;
+  const bool effectiveSelf = isSelf || (self && !selfId_.isEmpty());
 
-  QString name = senderName;
-  if (isSelf || selfId_.isEmpty()) {
-    name = senderName.isEmpty() ? QStringLiteral("我") : senderName;
-  }
+  auto* item = new MessageItem(api_, token_, this);
+  item->setQuoteResolver([this](const QString& id) { return resolveQuote(id); });
+  item->setMessage(message, effectiveSelf);
 
-  QString html = QStringLiteral("<div style=\"margin:6px 0;\">");
-  html += QStringLiteral("<span style=\"color:#888;font-size:11px;\">%1 · %2</span> ")
-             .arg(escapeHtml(name), formatTime(createdAt));
-  if (revoked) {
-    html += QStringLiteral("<span style=\"color:#c0392b;font-size:11px;\">（已撤回）</span>");
-  } else if (edited) {
-    html += QStringLiteral("<span style=\"color:#888;font-size:11px;\">（已编辑）</span>");
-  }
-  html += QStringLiteral("<br>");
-  html += revoked ? QStringLiteral("<i style=\"color:#999\">这条消息已被撤回</i>") : content;
-  html += QStringLiteral("</div>");
+  connect(item, &MessageItem::replyRequested, this, &ChatWindow::setReplyTo);
+  connect(item, &MessageItem::revokeRequested, this, &ChatWindow::revokeRequested);
+  connect(item, &MessageItem::interruptRequested, this, &ChatWindow::interruptRequested);
+  connect(item, &MessageItem::imageClicked, this, &ChatWindow::imageRequested);
+  connect(item, &MessageItem::fileClicked, this, &ChatWindow::fileRequested);
 
-  browser_->append(html);
+  auto* listItem = new QListWidgetItem(list_);
+  listItem->setSizeHint(item->sizeHint());
+  list_->setItemWidget(listItem, item);
+
+  // 记住正文，供 quote 解析
+  const QString text = messageText(message);
+  if (!text.isEmpty()) textById_.insert(messageId, text);
 }
 
 void ChatWindow::appendMessage(const QVariantMap& message) {
   if (message.value(QStringLiteral("conv_id")).toString() != convId_) return;
-  const QVariantMap sender = message.value(QStringLiteral("sender")).toMap();
-  const bool isSelf = sender.value(QStringLiteral("id")).toString() == selfId_;
-  renderMessage(message, isSelf);
-  browser_->verticalScrollBar()->setValue(browser_->verticalScrollBar()->maximum());
+  renderMessage(message, false);
+  scrollToBottom();
 }
 
 void ChatWindow::appendLocalEcho(const QVariantMap& message) {
   renderMessage(message, true);
-  browser_->verticalScrollBar()->setValue(browser_->verticalScrollBar()->maximum());
+  scrollToBottom();
+}
+
+void ChatWindow::applyStreamDelta(const QString& convId, const QString& messageId, const QString& delta) {
+  if (convId != convId_) return;
+  streamAcc_[messageId] += delta;
+  // 找到对应 item 更新流式正文
+  for (int i = 0; i < list_->count(); ++i) {
+    auto* item = qobject_cast<MessageItem*>(list_->itemWidget(list_->item(i)));
+    if (item != nullptr && item->messageId() == messageId) {
+      item->updateStreaming(streamAcc_.value(messageId), true);
+      scrollToBottom();
+      return;
+    }
+  }
+}
+
+void ChatWindow::applyMessageFinal(const QVariantMap& message) {
+  if (message.value(QStringLiteral("conv_id")).toString() != convId_) return;
+  const QString messageId = message.value(QStringLiteral("id")).toString();
+  streamAcc_.remove(messageId);
+  renderMessage(message, false);
+  scrollToBottom();
+}
+
+void ChatWindow::applyMessageRevoke(const QString& convId, const QString& messageId) {
+  if (convId != convId_) return;
+  // 撤回：本地标记"已撤回"，不要重拉历史 —— 服务端 history.fetch 会过滤掉
+  // 已撤回的消息，重拉会让这条消息凭空消失而不是显示"已撤回"。
+  for (int i = 0; i < list_->count(); ++i) {
+    auto* item = qobject_cast<MessageItem*>(list_->itemWidget(list_->item(i)));
+    if (item != nullptr && item->messageId() == messageId) {
+      item->markRevoked();
+      return;
+    }
+  }
+}
+
+void ChatWindow::applyMessageEdit(const QVariantMap& message) {
+  if (message.value(QStringLiteral("conv_id")).toString() != convId_) return;
+  const QString messageId = message.value(QStringLiteral("id")).toString();
+  // 原地替换：找到 item 重渲染
+  for (int i = 0; i < list_->count(); ++i) {
+    auto* item = qobject_cast<MessageItem*>(list_->itemWidget(list_->item(i)));
+    if (item != nullptr && item->messageId() == messageId) {
+      const QVariantMap sender = message.value(QStringLiteral("sender")).toMap();
+      const bool self = sender.value(QStringLiteral("id")).toString() == selfId_;
+      item->setMessage(message, self && !selfId_.isEmpty());
+      const QString text = messageText(message);
+      if (!text.isEmpty()) textById_.insert(messageId, text);
+      return;
+    }
+  }
+}
+
+void ChatWindow::setReplyTo(const QString& messageId) {
+  replyToId_ = messageId;
+  const QString quoted = resolveQuote(messageId);
+  replyBar_->setText(QStringLiteral("回复：%1").arg(quoted.isEmpty() ? QStringLiteral("…") : quoted));
+  replyBar_->setVisible(true);
+  replyCancelButton_->setVisible(true);
+  input_->setFocus();
+}
+
+void ChatWindow::clearReplyTo() {
+  replyToId_.clear();
+  replyBar_->setVisible(false);
+  replyCancelButton_->setVisible(false);
+}
+
+void ChatWindow::cancelReply() {
+  clearReplyTo();
+}
+
+QString ChatWindow::resolveQuote(const QString& messageId) const {
+  return textById_.value(messageId, QString());
+}
+
+void ChatWindow::scrollToBottom() {
+  list_->verticalScrollBar()->setValue(list_->verticalScrollBar()->maximum());
 }
 
 void ChatWindow::onSendClicked() {
   const QString text = input_->text().trimmed();
   if (text.isEmpty()) return;
   input_->clear();
-  emit sendRequested(text);
+  const QString replyTo = replyToId_;
+  clearReplyTo();
+  emit sendRequested(text, replyTo);
 }
 
 void ChatWindow::onReturnPressed() {
