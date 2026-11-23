@@ -1,0 +1,73 @@
+name: CI
+
+# 两个作业：
+#   build      —— 编译 + 协议层单测（快，不用 Docker，改错立刻红）
+#   acceptance —— 端到端（真连一台服务端）。用仓库自己的 Dockerfile 建镜像，
+#                 服务端镜像从 agentlink 仓库拉源码构建（公开仓库，无需凭据）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 编译 + 协议单测
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # 与 Dockerfile 的 build 阶段保持一致：装同一组包，
+      # 免得"CI 能过、镜像编不过"或者反过来。
+      - name: 装 Qt6 与构建工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake \
+            qt6-base-dev qt6-base-dev-tools \
+            libqt6websockets6-dev \
+            libgl1-mesa-dev libx11-dev libxext-dev \
+            libxcb1-dev libxcb-util-dev \
+            qt6-qpa-plugins
+
+      - name: 配置
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: 编译
+        run: cmake --build build -j"$(nproc)"
+
+      # e2e 需要一台真服务端，在这一步排除（-E e2e）；它由 acceptance 作业覆盖。
+      # 注意 CTest 输出的是 "100% tests passed"，不是 "Tests run:"。
+      - name: 协议层单测（frames / address / settings）
+        run: ctest --test-dir build --output-on-failure -E e2e
+
+      - name: GUI 二进制能起来（平台插件 / TLS 后端在位）
+        run: |
+          QT_QPA_PLATFORM=offscreen ./build/agentlink-qt --version | tee version.txt
+          grep -q 'agentlink-qt' version.txt
+          grep -qE 'Qt [0-9]+\.[0-9]+' version.txt
+
+  acceptance:
+    name: 端到端（真连服务端）
+    runs-on: ubuntu-22.04
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # 脚本自己准备两个镜像：本仓库的客户端镜像 + agentlink 服务端镜像。
+      # 服务端走 https://github.com/EzraX21/agentlink.git#refs/heads/main，
+      # 所以这里验证的是"公开仓库能被别人一键跑起来"这条路径本身。
+      - name: 跑验收
+        run: node scripts/acceptance.mjs
+
+      - name: 失败时留容器日志
+        if: failure()
+        run: docker ps -a && docker images
