@@ -38,6 +38,7 @@ class TestE2E : public QObject {
   void editsOwnMessage();
   void pinsMessage();
   void forwardsMessage();
+  void managesMembers();
 
  private:
   /// 跑一个事件循环直到 predicate 为真或超时。
@@ -798,6 +799,130 @@ void TestE2E::forwardsMessage() {
     }
   }
   QVERIFY2(false, "转发的内容没出现在目标群历史里");
+}
+
+void TestE2E::managesMembers() {
+  AuthResult auth;
+  Client client;
+  QVERIFY(registerAndConnect(auth, client, QStringLiteral("qt_member")));
+
+  // 另一个人，用来被邀请/踢出
+  AuthApi api;
+  api.setHttpBase(baseUrl_);
+  AuthResult other;
+  bool otherDone = false;
+  api.registerUser(
+      QStringLiteral("qt_member_b_%1").arg(QDateTime::currentMSecsSinceEpoch() % 100000),
+      QStringLiteral("被管理者"), QStringLiteral("qt-client-pass-1234"),
+      [&](const AuthResult& r) {
+        other = r;
+        otherDone = true;
+      });
+  QVERIFY(waitFor([&] { return otherDone; }));
+  QVERIFY2(other.ok, qPrintable(other.error));
+
+  QVariantMap conv;
+  bool convDone = false;
+  client.send(QStringLiteral("conv.create"),
+              QVariantMap{{QStringLiteral("kind"), QStringLiteral("group")},
+                          {QStringLiteral("title"), QStringLiteral("成员管理测试")}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                conv = data.value(QStringLiteral("conv")).toMap();
+                convDone = true;
+              });
+  QVERIFY(waitFor([&] { return convDone; }));
+  const QString convId = conv.value(QStringLiteral("id")).toString();
+
+  // 邀请
+  QVariantMap invited;
+  bool inviteDone = false;
+  client.send(QStringLiteral("member.invite"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("user_ids"), QStringList{other.userId}}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                invited = data;
+                inviteDone = true;
+              });
+  QVERIFY(waitFor([&] { return inviteDone; }));
+  bool found = false;
+  for (const QVariant& m : invited.value(QStringLiteral("members")).toList()) {
+    if (m.toMap().value(QStringLiteral("user_id")).toString() == other.userId) found = true;
+  }
+  QVERIFY2(found, "邀请后成员列表里有新成员");
+
+  // 设为管理员 → 角色变了
+  bool promoteDone = false;
+  client.send(QStringLiteral("member.role.set"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("user_id"), other.userId},
+                          {QStringLiteral("role"), QStringLiteral("admin")}},
+              [&](bool ok, const QVariantMap&, const WireError&) {
+                QVERIFY(ok);
+                promoteDone = true;
+              });
+  QVERIFY(waitFor([&] { return promoteDone; }));
+
+  {
+    QVariantMap got;
+    bool gotDone = false;
+    client.send(QStringLiteral("conv.get"), QVariantMap{{QStringLiteral("conv_id"), convId}},
+                [&](bool ok, const QVariantMap& data, const WireError&) {
+                  QVERIFY(ok);
+                  got = data;
+                  gotDone = true;
+                });
+    QVERIFY(waitFor([&] { return gotDone; }));
+    bool isAdmin = false;
+    for (const QVariant& m : got.value(QStringLiteral("members")).toList()) {
+      const QVariantMap member = m.toMap();
+      if (member.value(QStringLiteral("user_id")).toString() == other.userId &&
+          member.value(QStringLiteral("role")).toString() == QStringLiteral("admin")) {
+        isAdmin = true;
+      }
+    }
+    QVERIFY2(isAdmin, "设为管理员后角色是 admin");
+  }
+
+  // 禁言 → muted_until > now
+  const double until = static_cast<double>(QDateTime::currentMSecsSinceEpoch() + 600'000);
+  bool muteDone = false;
+  client.send(QStringLiteral("member.mute"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("user_id"), other.userId},
+                          {QStringLiteral("until_ms"), until}},
+              [&](bool ok, const QVariantMap&, const WireError&) {
+                QVERIFY(ok);
+                muteDone = true;
+              });
+  QVERIFY(waitFor([&] { return muteDone; }));
+
+  // 踢出 → 不在成员列表
+  bool kickDone = false;
+  client.send(QStringLiteral("member.kick"),
+              QVariantMap{{QStringLiteral("conv_id"), convId},
+                          {QStringLiteral("user_id"), other.userId}},
+              [&](bool ok, const QVariantMap&, const WireError&) {
+                QVERIFY(ok);
+                kickDone = true;
+              });
+  QVERIFY(waitFor([&] { return kickDone; }));
+
+  QVariantMap after;
+  bool afterDone = false;
+  client.send(QStringLiteral("conv.get"), QVariantMap{{QStringLiteral("conv_id"), convId}},
+              [&](bool ok, const QVariantMap& data, const WireError&) {
+                QVERIFY(ok);
+                after = data;
+                afterDone = true;
+              });
+  QVERIFY(waitFor([&] { return afterDone; }));
+  bool stillThere = false;
+  for (const QVariant& m : after.value(QStringLiteral("members")).toList()) {
+    if (m.toMap().value(QStringLiteral("user_id")).toString() == other.userId) stillThere = true;
+  }
+  QVERIFY2(!stillThere, "踢出后不在成员列表");
 }
 
 QTEST_GUILESS_MAIN(TestE2E)

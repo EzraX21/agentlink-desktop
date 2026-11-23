@@ -52,6 +52,7 @@ class MainWindow : public QMainWindow {
   void onFileRequested(const QString& attachmentId, const QString& filename);
   void onCreateGroup();
   void onOpenGroupInfo();
+  void onOpenMembers();
   void onToggleSearch();
   void onJumpToMessage(const QString& convId, const QString& messageId, qint64 seq);
   void onInputTextChanged();

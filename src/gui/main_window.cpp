@@ -28,6 +28,7 @@
 #include "core/settings.hpp"
 #include "create_group_dialog.hpp"
 #include "group_info_dialog.hpp"
+#include "members_dialog.hpp"
 #include "onboarding.hpp"
 #include "search_panel.hpp"
 
@@ -99,6 +100,9 @@ void MainWindow::buildMenus() {
 
   auto* groupInfoAction = conversationMenu->addAction(QStringLiteral("群信息…"));
   connect(groupInfoAction, &QAction::triggered, this, &MainWindow::onOpenGroupInfo);
+
+  auto* membersAction = conversationMenu->addAction(QStringLiteral("成员管理…"));
+  connect(membersAction, &QAction::triggered, this, &MainWindow::onOpenMembers);
 
   auto* searchAction = conversationMenu->addAction(QStringLiteral("搜索消息…"));
   searchAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+K")));
@@ -456,6 +460,21 @@ void MainWindow::onOpenGroupInfo() {
   GroupInfoDialog dialog(convTitle_, convAnnouncement_, this);
   if (dialog.exec() != QDialog::Accepted) return;
   saveGroupInfo(dialog.title(), dialog.announcement());
+}
+
+void MainWindow::onOpenMembers() {
+  const QString convId = chat_->conversationId();
+  if (convId.isEmpty()) {
+    chat_->setStatus(QStringLiteral("先选一个会话"), true);
+    return;
+  }
+  MembersDialog dialog(client_, convId, client_->selfId(), members_, this);
+  dialog.exec();
+  // 对话框里改过成员之后，主窗口缓存的那份要作废 —— 否则下次打开还是旧的
+  client_->send(QStringLiteral("conv.get"), QVariantMap{{QStringLiteral("conv_id"), convId}},
+                [this](bool ok, const QVariantMap& data, const WireError&) {
+                  if (ok) members_ = data.value(QStringLiteral("members")).toList();
+                });
 }
 
 void MainWindow::saveGroupInfo(const QString& title, const QString& announcement) {

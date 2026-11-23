@@ -45,6 +45,7 @@ if(BUILD_GUI)
     src/gui/conversation_list.cpp
     src/gui/create_group_dialog.cpp
     src/gui/group_info_dialog.cpp
+    src/gui/members_dialog.cpp
     src/gui/search_panel.cpp
   )
   target_link_libraries(agentlink-qt PRIVATE agentlink_core Qt6::Widgets)

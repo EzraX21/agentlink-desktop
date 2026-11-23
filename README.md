@@ -28,7 +28,7 @@ agentlink-qt（可执行程序，依赖 Widgets）
   ├── ConversationList 左侧：会话列表
   ├── ChatWindow       右侧：消息流（QListWidget + 每条消息一个 MessageItem）
   ├── MessageItem      单条消息：文本 / 图片缩略图 / 视频缩略图 / 流式 + 打断
-  ├── CreateGroupDialog / GroupInfoDialog / SearchPanel
+  ├── CreateGroupDialog / GroupInfoDialog / MembersDialog / SearchPanel
 ```
 
 **为什么协议核心单独成库且不依赖 GUI**：协议逻辑是最容易出错、也最值得测的部分，
@@ -110,8 +110,8 @@ node scripts/acceptance.mjs
   平台依赖：Linux 上是 libsecret / kwallet，各家还不一样）。
 - **不做端到端加密**。协议明确排除（需求确认书 §5）。
 - **UI 是功能导向的**：会话列表、消息流（含内联图片/视频缩略图）、回复、撤回、
-  打断 AI、建群、群信息、消息搜索、表情回应、编辑、置顶、转发、正在输入、已读回执、
-  发附件。不做多语言、不做移动端、不做音视频。
+  打断 AI、建群、群信息、**成员管理（邀请/踢出/禁言/设角色）**、消息搜索、
+  表情回应、编辑、置顶、转发、正在输入、已读回执、发附件。不做多语言、不做移动端、不做音视频。
 - **编辑/撤回消息用"重拉历史"**重渲染，而不是增量更新。v1 频率低，不值得做增量。
 
 ## 测试
@@ -130,7 +130,7 @@ ctest --test-dir build -R e2e --output-on-failure
 | `test-frames` | 帧编解码：req/res/evt、瞬时事件 seq=null、坏帧拒收、1 MiB 上限、往返一致 |
 | `test-address` | 服务器地址解析：补协议头、https→wss、保端口、拒垃圾输入、http base |
 | `test-settings` | 多服务器读写：覆盖不丢激活标记、激活切换、重载持久化 |
-| `test-e2e` | **真连服务端**：注册 → WS 认证 → 建群 → 发消息 → 收推送 → 读历史 → 上传附件 → 回复 → 撤回 → 群信息 → 搜索 → 表情回应 → 编辑 → 置顶 → 转发 |
+| `test-e2e` | **真连服务端**：注册 → WS 认证 → 建群 → 发消息 → 收推送 → 读历史 → 上传附件 → 回复 → 撤回 → 群信息 → 搜索 → 表情回应 → 编辑 → 置顶 → 转发 → 成员管理（邀请/设管理员/禁言/踢出） |
 
 `test-e2e` 在没有 `AGENTLINK_TEST_URL` 时**跳过**（退出码 77），不是失败。
 
