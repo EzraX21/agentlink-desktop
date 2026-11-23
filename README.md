@@ -16,6 +16,41 @@ Web 客户端做不到这点（它是跑在浏览器里的，地址由部署方�
 - 一台客户端可以连**多台**服务端（公司一台、私人一台、测试一台）
 - 服务端部署在哪儿都无所谓，客户端只认地址
 
+## 下载安装
+
+从 [Releases](https://github.com/EzraX21/agentlink-desktop/releases) 下最新版本，
+三平台都有：
+
+### Linux
+
+```bash
+# Debian / Ubuntu：装 .deb
+sudo apt install ./agentlink-desktop_1.0.0_amd64.deb
+
+# 任意 x86_64 发行版：AppImage，不需要 root
+chmod +x AgentLink-x86_64.AppImage
+./AgentLink-x86_64.AppImage
+```
+
+装完可以从应用菜单启动（叫 **AgentLink**），也可以命令行 `agentlink-qt`。
+
+### Windows
+
+下载 `AgentLink-windows-x64.zip`，解压后双击 `agentlink-qt.exe` —— 免安装、免管理员权限。
+
+### macOS
+
+下载 `AgentLink-macos.dmg`，打开后把 AgentLink 拖进「应用程序」。
+（未签名，首次打开需在「系统设置 → 隐私与安全性」里点「仍要打开」。）
+
+### 首次启动
+
+会先让你**填服务器地址**（你自己部署的那台 AgentLink），然后注册或登录。
+地址与登录态存在本地，下次启动直接进聊天。菜单「服务器 → 添加 / 切换服务器…」
+可以随时换一台。
+
+服务端怎么起：<https://github.com/EzraX21/agentlink>
+
 ## 架构
 
 ```

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=AgentLink
+Name[zh_CN]=AgentLink
+GenericName=即时通讯
+GenericName[zh_CN]=即时通讯
+Comment=连接你自己部署的 AgentLink 服务端
+Comment[zh_CN]=连接你自己部署的 AgentLink 服务端
+Exec=agentlink-qt
+Icon=agentlink
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=chat;im;agent;agentlink;
+StartupWMClass=agentlink-qt

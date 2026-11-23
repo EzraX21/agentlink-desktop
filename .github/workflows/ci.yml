@@ -71,12 +71,19 @@ jobs:
       # 截图留在 ../.runtime/qt-shots（脚本默认位置）。传成产物，
       # 这样在 Actions 页面能直接看到"界面到底画成了什么样"，
       # 不用为了看一眼渲染结果重跑一遍。
+      # upload-artifact 不接受带 `..` 的路径，先拷进工作区再传
+      - name: 收集界面截图
+        if: always()
+        run: |
+          mkdir -p screenshots
+          cp -v ../.runtime/qt-shots/*.png screenshots/ 2>/dev/null || echo "没有截图"
+
       - name: 上传界面截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: qt-screenshots
-          path: ../.runtime/qt-shots/*.png
+          path: screenshots/*.png
           if-no-files-found: warn
 
       - name: 失败时留容器日志

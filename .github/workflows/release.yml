@@ -1,0 +1,245 @@
+name: Release
+
+# 打 tag（v1.0.0 这种）就构建三平台安装包，挂到 GitHub Release 上，
+# 用户从 Releases 页面直接下载装上就能用。
+#
+# 也可以手动触发（workflow_dispatch）只跑构建、不建 Release —— 用来验证打包链路。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # 创建 Release / 上传附件
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux：.deb（Debian/Ubuntu）+ AppImage（不挑发行版，chmod +x 就能跑）
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux 安装包
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake file \
+            qt6-base-dev qt6-base-dev-tools libqt6websockets6-dev \
+            libgl1-mesa-dev libx11-dev libxext-dev libxcb1-dev libxcb-util-dev \
+            libfuse2
+
+      - name: 配置与编译
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+
+      # ---- .deb ----
+      - name: 打 .deb
+        run: cd build && cpack -G DEB
+
+      # ---- AppImage ----
+      # linuxdeploy 把 Qt 库、平台插件、TLS 后端一起打进单文件，
+      # 用户在任意 x86_64 发行版上 chmod +x 就能运行 —— 这是"通用安装命令"的关键。
+      - name: 准备 AppDir
+        run: |
+          set -euo pipefail
+          cmake --install build --prefix /tmp/AppDir/usr
+          mkdir -p /tmp/AppDir/usr/share/applications
+          cp packaging/agentlink.desktop /tmp/AppDir/usr/share/applications/
+          cp packaging/agentlink.svg /tmp/AppDir/agentlink.svg
+          ln -sf usr/share/applications/agentlink.desktop /tmp/AppDir/agentlink.desktop
+
+      - name: 下载 linuxdeploy
+        run: |
+          set -euo pipefail
+          curl -fsSL -o linuxdeploy.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -fsSL -o linuxdeploy-plugin-qt.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy*.AppImage
+
+      - name: 打 AppImage
+        env:
+          # AppImage 的打包工具自己是 AppImage，在容器里运行要这个
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          OUTPUT: AgentLink-x86_64.AppImage
+        run: |
+          set -euo pipefail
+          export QMAKE=/usr/lib/qt6/bin/qmake6
+          ./linuxdeploy.AppImage \
+            --appdir /tmp/AppDir \
+            --plugin qt \
+            --output appimage
+
+      - name: 收集产物
+        run: |
+          mkdir -p out
+          cp build/*.deb out/ 2>/dev/null || true
+          cp *.AppImage out/ 2>/dev/null || true
+          # linuxdeploy 可能把小写名字，统一成可读的名字
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: out/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows：windeployqt 打好的便携包（解压即用，无需管理员权限）
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows 安装包
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.5.3'
+          arch: win64_msvc2019_64
+          cache: true
+
+      - name: 配置与编译
+        # MSVC 在多配置生成器下把产物放在 Release/ 子目录
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=ON
+          cmake --build build --config Release -j
+
+      - name: windeployqt（把 Qt 库与插件一起拷出来）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item build\Release\agentlink-qt.exe dist\
+          windeployqt --release --no-translations --no-system-d3d-compiler `
+            --no-opengl-sw dist\agentlink-qt.exe
+
+      - name: 打 zip
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE dist\LICENSE.txt
+          @"
+          AgentLink Desktop（Windows 便携版）
+          1. 解压到任意目录
+          2. 双击 agentlink-qt.exe
+          无需安装、无需管理员权限。
+          首次启动会让你填服务端地址，再注册/登录。
+          "@ | Out-File -Encoding utf8 dist\README.txt
+          Compress-Archive -Path dist\* -DestinationPath AgentLink-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-packages
+          path: AgentLink-windows-x64.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # macOS：macdeployqt 打 dmg
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS 安装包
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.5.3'
+          cache: true
+
+      - name: 配置与编译
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=ON
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: 打 app bundle 并部署 Qt
+        run: |
+          set -euo pipefail
+          cmake --install build --prefix /tmp/AgentLink
+          # macdeployqt 要把可执行文件变成 .app；这里手动组一个最小 bundle
+          APP=/tmp/AgentLink/AgentLink.app
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp /tmp/AgentLink/bin/agentlink-qt "$APP/Contents/MacOS/AgentLink"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>AgentLink</string>
+            <key>CFBundleDisplayName</key><string>AgentLink</string>
+            <key>CFBundleIdentifier</key><string>io.agentlink.desktop</string>
+            <key>CFBundleVersion</key><string>1.0.0</string>
+            <key>CFBundleShortVersionString</key><string>1.0.0</string>
+            <key>CFBundleExecutable</key><string>AgentLink</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+          </dict>
+          </plist>
+          PLIST
+          macdeployqt "$APP"
+
+      - name: 打 dmg
+        run: |
+          set -euo pipefail
+          hdiutil create -volname "AgentLink" -srcfolder /tmp/AgentLink/AgentLink.app \
+            -ov -format UDZO AgentLink-macos.dmg
+          ls -la AgentLink-macos.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-packages
+          path: AgentLink-macos.dmg
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 建 Release 并把三平台产物挂上去（仅 tag 触发时）
+  # ---------------------------------------------------------------------------
+  release:
+    name: 发布到 GitHub Releases
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 整理附件
+        run: |
+          mkdir -p assets
+          find artifacts -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.zip' -o -name '*.dmg' \) -exec cp {} assets/ \;
+          ls -la assets/
+
+      # 用 softprops/action-gh-release 一步建 Release + 上传附件。
+      # body 里写安装命令，用户从 Release 页就能照抄。
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          generate_release_notes: true
+          body: |
+            ## 下载安装
+
+            ### Linux
+            ```bash
+            # .deb（Debian / Ubuntu）
+            sudo apt install ./agentlink-desktop-*.deb
+
+            # AppImage（任意 x86_64 发行版，不需要 root）
+            chmod +x AgentLink-x86_64.AppImage && ./AgentLink-x86_64.AppImage
+            ```
+
+            ### Windows
+            下载 `AgentLink-windows-x64.zip`，解压后双击 `agentlink-qt.exe`（免安装）。
+
+            ### macOS
+            下载 `AgentLink-macos.dmg`，打开后把 AgentLink 拖进「应用程序」。
+
+            ---
+
+            首次启动会让你**填服务端地址**（自己部署的那台），然后注册 / 登录。
+            服务端怎么起：<https://github.com/EzraX21/agentlink>

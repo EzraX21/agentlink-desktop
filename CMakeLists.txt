@@ -77,3 +77,42 @@ add_executable(test-e2e tests/test_e2e.cpp)
 target_link_libraries(test-e2e PRIVATE agentlink_core Qt6::Test)
 add_test(NAME e2e COMMAND test-e2e)
 set_tests_properties(e2e PROPERTIES SKIP_RETURN_CODE 77)
+
+# ---------------------------------------------------------------------------
+# 打包（安装包）
+# ---------------------------------------------------------------------------
+# 目标是"下下来装上就能用"，所以要把程序装进标准路径、带 .desktop 入口，
+# 并声明运行期依赖（Qt 库、libssl 等）—— 否则用户装上打不开还得自己 apt install。
+#
+#   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+#   cmake --build build -j"$(nproc)"
+#   cd build && cpack -G DEB        # 生成 .deb
+#   cd build && cpack -G TGZ        # 生成 .tar.gz（不挑发行版）
+if(BUILD_GUI)
+  install(TARGETS agentlink-qt RUNTIME DESTINATION bin)
+
+  # 桌面入口：不装这个的话，从应用菜单里找不到程序，只能命令行敲。
+  # 只有 Linux/BSD 需要 .desktop 与图标；Windows 的 zip 里放这些没有意义。
+  if(UNIX AND NOT APPLE)
+    install(FILES packaging/agentlink.desktop DESTINATION share/applications)
+    install(FILES packaging/agentlink.svg DESTINATION share/icons/hicolor/scalable/apps)
+  endif()
+
+  set(CPACK_PACKAGE_NAME "agentlink-desktop")
+  set(CPACK_PACKAGE_VENDOR "AgentLink")
+  set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "AgentLink 桌面客户端（Qt6）")
+  set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+  set(CPACK_PACKAGE_CONTACT "AgentLink")
+  set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+  set(CPACK_PACKAGE_INSTALL_DIRECTORY "agentlink-desktop")
+
+  # Debian 包：运行期依赖必须写全，否则装上后缺库打不开。
+  # jammy 的 Qt6 库名没有 t64 后缀（那是 trixie / 24.10 之后的事）。
+  set(CPACK_DEBIAN_PACKAGE_DEPENDS
+      "libqt6core6, libqt6network6, libqt6widgets6, libqt6gui6, libqt6websockets6, qt6-qpa-plugins, libssl3")
+  set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+  set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+
+  set(CPACK_GENERATOR "DEB;TGZ")
+  include(CPack)
+endif()
