@@ -44,9 +44,16 @@ int main(int argc, char** argv) {
   //
   // 配 QT_QPA_PLATFORM=offscreen 用，所以不需要 Xvfb。
   QString screenshotPath;
+  bool screenshotMainWindow = false;
   for (int i = 1; i < argc; ++i) {
-    if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--screenshot") && i + 1 < argc) {
+    const QString arg = QString::fromLocal8Bit(argv[i]);
+    if (arg == QStringLiteral("--screenshot") && i + 1 < argc) {
       screenshotPath = QString::fromLocal8Bit(argv[i + 1]);
+    }
+    // 强制抓主窗口（聊天界面）：CI 里没有已保存的登录态，否则只会抓到引导页，
+    // 而聊天界面才是主界面 —— 它的布局坏了同样得有人发现。
+    if (arg == QStringLiteral("--screenshot-main")) {
+      screenshotMainWindow = true;
     }
   }
 
@@ -73,7 +80,7 @@ int main(int argc, char** argv) {
     QWidget* target = nullptr;
     Onboarding onboarding(&api, &settings);
     const ServerEntry* saved = settings.activeEntry();
-    if (saved != nullptr && !saved->accessToken.isEmpty()) {
+    if (screenshotMainWindow || (saved != nullptr && !saved->accessToken.isEmpty())) {
       auto* window = new MainWindow(&client, &api, &settings);
       window->show();
       target = window;

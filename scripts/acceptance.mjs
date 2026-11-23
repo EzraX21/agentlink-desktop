@@ -337,8 +337,33 @@ async function main() {
       // 而不是一条横线或者一块色。
       ok(stats.contentRows >= 20,
         `有纵向布局（${stats.contentRows}/${stats.height} 行含内容）`);
-      console.log(`    截图留在：${shotPath}`);
     }
+
+    // 主窗口（聊天界面）：这才是主界面。CI 里没有登录态，所以用
+    // --screenshot-main 强制抓它 —— 会话列表 / 消息区 / 输入框的布局坏了
+    // 同样得有人发现，不能只验引导页。
+    const mainShotPath = path.join(SHOTS_DIR, 'main-window.png');
+    const mainShot = await docker([
+      'run', '--rm',
+      '-e', 'QT_QPA_PLATFORM=offscreen',
+      '-v', `${SHOTS_DIR}:/shots`,
+      DESKTOP_IMAGE,
+      '--screenshot', '/shots/main-window.png', '--screenshot-main',
+    ]);
+    ok(
+      mainShot.code === 0 && /screenshot ok/.test(mainShot.stdout),
+      `主窗口离屏渲染成功（${mainShot.stdout.trim().split('\n').pop() ?? mainShot.stderr.trim().slice(0, 200)}）`,
+    );
+    try {
+      const m = pngStats(readFileSync(mainShotPath));
+      ok(m.width >= 900 && m.height >= 600,
+        `主窗口尺寸合理（${m.width}×${m.height}，是个窗口不是小对话框）`);
+      ok(m.colors >= 20, `主窗口不是纯色块（${m.colors} 种颜色）`);
+      ok(m.contentRows >= 40, `主窗口有纵向布局（${m.contentRows}/${m.height} 行含内容）`);
+    } catch (err) {
+      ok(false, `主窗口截图解析失败：${err.message}`);
+    }
+    console.log(`    截图留在：${SHOTS_DIR}`);
 
     section('3. 协议层单测（不需要服务端）');
     // 注意 --entrypoint sh：镜像的 ENTRYPOINT 是 GUI 可执行文件，
