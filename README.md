@@ -1,5 +1,8 @@
 # AgentLink Desktop
 
+[![CI](https://github.com/EzraX21/agentlink-desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/EzraX21/agentlink-desktop/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+
 [AgentLink](https://github.com/EzraX21/agentlink) 的原生 C++/Qt 6 桌面客户端，
 不是网页套壳。
 
