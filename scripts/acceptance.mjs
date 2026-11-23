@@ -24,8 +24,10 @@
  */
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
+import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 
 // ---- 极简断言（让本仓库不依赖 agentlink 仓库的任何东西） ----
 let failed = 0;
@@ -43,6 +45,9 @@ function gte(actual, min, label) {
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SERVER_IMAGE = 'agentlink-server:latest';
+/** 截图留档目录：人想看一眼渲染结果时不用再跑一遍。 */
+const SHOTS_DIR =
+  process.env.AGENTLINK_SHOT_DIR ?? path.join(REPO_ROOT, '..', '.runtime', 'qt-shots');
 const DESKTOP_IMAGE = 'agentlink-desktop:latest';
 const SERVER_GIT_URL =
   // 注意 #refs/heads/main：docker build 从 git URL 拉源码时**默认找 master 分支**，
@@ -114,6 +119,103 @@ async function waitFor(url, timeoutMs = 90_000) {
     await new Promise((r) => setTimeout(r, 500));
   }
   return false;
+}
+
+/**
+ * 极简 PNG 统计（只支持我们要的形态：8 位、非隔行、RGB 或 RGBA）。
+ *
+ * 为什么自己解而不是装 pngjs：验收脚本目前零依赖，装个库就为了数颜色
+ * 不划算；而 PNG 的 deflate 解压 zlib 就有，反过滤也就几十行。
+ *
+ * 返回的 stats 用来断言"这张图不是空白"：
+ *   - width/height  尺寸合理
+ *   - colors        不同颜色数（有文字就该有抗锯齿产生的大量中间色）
+ *   - darkRatio     深色像素占比（文字）
+ *   - contentRows   含内容的行数（布局是多行而不是一块纯色）
+ */
+function pngStats(buf) {
+  if (buf.length < 33) throw new Error('not a png');
+  const width = buf.readUInt32BE(16);
+  const height = buf.readUInt32BE(20);
+  const depth = buf[24];
+  const colorType = buf[25];
+  if (depth !== 8 || (colorType !== 2 && colorType !== 6)) {
+    throw new Error(`不支持的 PNG 形态：depth=${depth} colorType=${colorType}`);
+  }
+  const channels = colorType === 6 ? 4 : 3;
+
+  // 收集 IDAT
+  const idat = [];
+  let off = 8;
+  while (off + 8 <= buf.length) {
+    const len = buf.readUInt32BE(off);
+    const type = buf.toString('ascii', off + 4, off + 8);
+    const dataStart = off + 8;
+    if (type === 'IDAT') idat.push(buf.subarray(dataStart, dataStart + len));
+    if (type === 'IEND') break;
+    off = dataStart + len + 4;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+
+  const stride = width * channels;
+  const out = Buffer.alloc(height * stride);
+  let pos = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[pos];
+    pos += 1;
+    const rowStart = y * stride;
+    for (let x = 0; x < stride; x += 1) {
+      const rawByte = raw[pos + x];
+      const a = x >= channels ? out[rowStart + x - channels] : 0;
+      const b = y > 0 ? out[rowStart - stride + x] : 0;
+      const c = x >= channels && y > 0 ? out[rowStart - stride + x - channels] : 0;
+      let v;
+      switch (filter) {
+        case 0: v = rawByte; break;
+        case 1: v = rawByte + a; break;
+        case 2: v = rawByte + b; break;
+        case 3: v = rawByte + ((a + b) >> 1); break;
+        case 4: {
+          const p = a + b - c;
+          const pa = Math.abs(p - a);
+          const pb = Math.abs(p - b);
+          const pc = Math.abs(p - c);
+          v = rawByte + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
+          break;
+        }
+        default: throw new Error(`未知 PNG 过滤器 ${filter}`);
+      }
+      out[rowStart + x] = v & 0xff;
+    }
+    pos += stride;
+  }
+
+  const colors = new Set();
+  let dark = 0;
+  const bgR = out[0];
+  const bgG = out[1];
+  const bgB = out[2];
+  const rows = new Array(height).fill(false);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = y * stride + x * channels;
+      const r = out[i];
+      const g = out[i + 1];
+      const bl = out[i + 2];
+      colors.add((r << 16) | (g << 8) | bl);
+      const lum = 0.299 * r + 0.587 * g + 0.114 * bl;
+      if (lum < 100) dark += 1;
+      if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(bl - bgB) > 12) rows[y] = true;
+    }
+  }
+  const total = width * height;
+  return {
+    width,
+    height,
+    colors: colors.size,
+    darkRatio: dark / total,
+    contentRows: rows.filter(Boolean).length,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +294,51 @@ async function main() {
       `GUI 二进制可执行：${version.stdout.trim() || version.stderr.trim().slice(0, 300)}`,
     );
     ok(/Qt \d+\.\d+/.test(version.stdout), `带出 Qt 版本（${/Qt [0-9.]+/.exec(version.stdout)?.[0] ?? '无'}）`);
+
+    section('2b. GUI 真的画得出界面（离屏渲染 + 截图分析）');
+    // `--version` 只证明"二进制能起来"。缺字体、样式表加载失败、布局塌成 0×0
+    // 这些问题它一个都抓不到 —— 必须真的渲染一遍再检查像素。
+    //
+    // 用 offscreen 平台插件，所以不需要 Xvfb 或任何显示环境。
+    // 直接挂到 SHOTS_DIR：不能用 mkdtemp('/tmp')，docker daemon 看不到
+    // 本进程的 /tmp（沙箱里 /tmp 是私有的），容器写成功了宿主机却读不到。
+    mkdirSync(SHOTS_DIR, { recursive: true });
+    const shotPath = path.join(SHOTS_DIR, 'onboarding.png');
+    const shot = await docker([
+      'run', '--rm',
+      '-e', 'QT_QPA_PLATFORM=offscreen',
+      '-v', `${SHOTS_DIR}:/shots`,
+      DESKTOP_IMAGE,
+      '--screenshot', '/shots/onboarding.png',
+    ]);
+    ok(
+      shot.code === 0 && /screenshot ok/.test(shot.stdout),
+      `离屏渲染成功（${shot.stdout.trim().split('\n').pop() ?? shot.stderr.trim().slice(0, 200)}）`,
+    );
+
+    let stats = null;
+    try {
+      stats = pngStats(readFileSync(shotPath));
+    } catch (err) {
+      ok(false, `截图解析失败：${err.message}`);
+    }
+    if (stats !== null) {
+      // 尺寸：引导对话框定的是 440×280 左右，给它一个下限而不是精确值，
+      // 免得以后调窗口大小就要改测试。
+      ok(stats.width >= 400 && stats.height >= 250,
+        `截图尺寸合理（${stats.width}×${stats.height}）`);
+      // 颜色数：纯色背景 + 有文字 → 抗锯齿会产生几十上百种中间色。
+      // 少于 20 基本可以断定"只画了个底色，控件没出来"。
+      ok(stats.colors >= 20, `不是纯色块（${stats.colors} 种颜色）`);
+      // 深色像素 = 文字。完全没有文字说明标签/按钮没渲染。
+      ok(stats.darkRatio > 0.002,
+        `有文字像素（深色占比 ${(stats.darkRatio * 100).toFixed(2)}%）`);
+      // 含内容的行数：多行说明是"若干标签 + 输入框 + 按钮"的布局，
+      // 而不是一条横线或者一块色。
+      ok(stats.contentRows >= 20,
+        `有纵向布局（${stats.contentRows}/${stats.height} 行含内容）`);
+      console.log(`    截图留在：${shotPath}`);
+    }
 
     section('3. 协议层单测（不需要服务端）');
     // 注意 --entrypoint sh：镜像的 ENTRYPOINT 是 GUI 可执行文件，

@@ -1,5 +1,9 @@
 #include <QApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QMessageBox>
+#include <QPixmap>
+#include <QTimer>
 #include <cstdio>
 
 #include "core/auth_api.hpp"
@@ -32,6 +36,20 @@ int main(int argc, char** argv) {
   // 存在的意义是**可验证性**：验收套件要证明"GUI 二进制真的能起来"
   // （Qt 平台插件、TLS 后端、动态库都在位），但它不能弹窗口等用户点。
   // 有这条，`qt-client` 套件就能在不带显示环境的情况下断言 GUI 可执行。
+  // `--screenshot <path>`：渲染首屏并抓成 PNG，然后退出。
+  //
+  // 为什么需要它：`--version` 只能证明"二进制能起来"，证明不了**界面画得出来** ——
+  // 缺字体、样式表加载失败、控件布局塌成 0×0 这类问题它一个都抓不到。
+  // 有了截图，验收能断言"这张图不是空白"，等于真的渲染过一遍。
+  //
+  // 配 QT_QPA_PLATFORM=offscreen 用，所以不需要 Xvfb。
+  QString screenshotPath;
+  for (int i = 1; i < argc; ++i) {
+    if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--screenshot") && i + 1 < argc) {
+      screenshotPath = QString::fromLocal8Bit(argv[i + 1]);
+    }
+  }
+
   for (int i = 1; i < argc; ++i) {
     const QString arg = QString::fromLocal8Bit(argv[i]);
     if (arg == QStringLiteral("--version") || arg == QStringLiteral("-v")) {
@@ -48,6 +66,33 @@ int main(int argc, char** argv) {
 
   AuthApi api;
   Client client;
+
+  // 截图模式：渲染当前启动形态（有已存服务器 → 主窗口；否则 → 引导页）后退出。
+  if (!screenshotPath.isEmpty()) {
+    // 让布局与样式表先应用完，再抓图；否则可能抓到一张还没排版的空白。
+    QWidget* target = nullptr;
+    Onboarding onboarding(&api, &settings);
+    const ServerEntry* saved = settings.activeEntry();
+    if (saved != nullptr && !saved->accessToken.isEmpty()) {
+      auto* window = new MainWindow(&client, &api, &settings);
+      window->show();
+      target = window;
+    } else {
+      onboarding.show();
+      target = &onboarding;
+    }
+
+    // 转几圈事件循环：show() 之后尺寸/字体/样式才真正落到控件上
+    for (int i = 0; i < 5; ++i) {
+      QApplication::processEvents();
+    }
+    const QPixmap shot = target->grab();
+    QDir().mkpath(QFileInfo(screenshotPath).absolutePath());
+    const bool saved_ok = shot.save(screenshotPath, "PNG");
+    std::printf("screenshot %s %dx%d -> %s\n", saved_ok ? "ok" : "failed",
+                shot.width(), shot.height(), screenshotPath.toUtf8().constData());
+    return saved_ok ? 0 : 1;
+  }
 
   // 有记住的服务器就直接连。
   const ServerEntry* active = settings.activeEntry();
