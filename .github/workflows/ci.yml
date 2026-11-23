@@ -68,6 +68,17 @@ jobs:
       - name: 跑验收
         run: node scripts/acceptance.mjs
 
+      # 截图留在 ../.runtime/qt-shots（脚本默认位置）。传成产物，
+      # 这样在 Actions 页面能直接看到"界面到底画成了什么样"，
+      # 不用为了看一眼渲染结果重跑一遍。
+      - name: 上传界面截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qt-screenshots
+          path: ../.runtime/qt-shots/*.png
+          if-no-files-found: warn
+
       - name: 失败时留容器日志
         if: failure()
         run: docker ps -a && docker images
