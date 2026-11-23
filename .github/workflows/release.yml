@@ -103,10 +103,11 @@ jobs:
           version: '6.5.3'
           arch: win64_msvc2019_64
           cache: true
-          # 必须显式装 websockets 模块：默认只装 Core/Gui/Widgets，
-          # 而 find_package 会要 WebSockets —— 少了它 CMake 直接报
-          # "Failed to find required Qt component WebSockets"。
-          modules: 'websockets'
+          # Qt 的 WebSockets 是**独立 archive**，不在默认集合里 ——
+          # 少了它 CMake 直接报 "Failed to find required Qt component WebSockets"。
+          # 注意它不是 addon 模块（modules: 那条是商业 addon，会报
+          # "The packages ['websockets'] were not found"），要用 archives。
+          archives: 'qtwebsockets'
 
       - name: 配置与编译
         # MSVC 在多配置生成器下把产物放在 Release/ 子目录
@@ -155,8 +156,8 @@ jobs:
         with:
           version: '6.5.3'
           cache: true
-          # 同上：WebSockets 模块不在默认集里，少了它 CMake 配不过
-          modules: 'websockets'
+          # 同上：WebSockets 是独立 archive，不在默认集合里
+          archives: 'qtwebsockets'
 
       - name: 配置与编译
         run: |
