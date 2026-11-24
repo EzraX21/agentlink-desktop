@@ -146,6 +146,29 @@ jobs:
           "$WD" --release --no-translations --no-system-d3d-compiler --no-opengl-sw dist/agentlink-qt.exe
           ls dist | head -20
 
+      # MinGW 编译器产出的 exe 还依赖 libstdc++-6 / libgcc_s_seh-1 /
+      # libwinpthread-1 这些**运行库**。windeployqt 只管 Qt 自己的库，不管它们。
+      # 少了任何一个，exe 在没装 MSYS2 的机器上根本起不来 ——
+      # Windows 的表现就是"双击闪一下就没了"（第一版 v1.0.0 就是这个毛病）。
+      - name: 补 MinGW 运行库
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          # 用 ldd 把所有落在 /ucrt64 下的依赖都拷过来（比手写名单可靠：
+          # 编译器版本一变，链路里冒出来的库就不同）
+          ldd dist/agentlink-qt.exe | grep -oE '/ucrt64/bin/[^ ]+\.dll' | sort -u | while read -r dll; do
+            base=$(basename "$dll")
+            if [ ! -f "dist/$base" ]; then
+              cp "$dll" "dist/$base"
+              echo "补: $base"
+            fi
+          done
+          echo "--- 关键运行库确认 ---"
+          for f in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
+            test -f "dist/$f" || { echo "缺 $f"; exit 1; }
+            echo "有: $f"
+          done
+
       - name: 打 zip
         shell: pwsh
         run: |

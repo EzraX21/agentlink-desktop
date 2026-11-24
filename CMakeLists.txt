@@ -50,6 +50,11 @@ if(BUILD_GUI)
   )
   target_link_libraries(agentlink-qt PRIVATE agentlink_core Qt6::Widgets)
   target_compile_options(agentlink-qt PRIVATE -Wall -Wextra)
+  # Windows 上必须是 GUI 子系统（-mwindows）。默认是 console 子系统，
+  # 双击时会先弹一个黑色 cmd 窗口；程序一退出它就消失，看起来像"闪一下就没了"。
+  if(WIN32)
+    set_target_properties(agentlink-qt PROPERTIES WIN32_EXECUTABLE TRUE)
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------
