@@ -76,10 +76,14 @@ jobs:
 
       - name: 收集产物
         run: |
+          set -euo pipefail
           mkdir -p out
-          cp build/*.deb out/ 2>/dev/null || true
-          cp *.AppImage out/ 2>/dev/null || true
-          # linuxdeploy 可能把小写名字，统一成可读的名字
+          cp build/*.deb out/
+          # 只拷我们自己的 AppImage —— 不能写 *.AppImage：
+          # 工作区里还有 linuxdeploy 与 linuxdeploy-plugin-qt 两个工具，
+          # 通配符会把它们也当成交付物发布出去（第一次发版就这么干了，
+          # Release 里多了两个 38 MB 的打包工具）。
+          cp AgentLink-x86_64.AppImage out/
           ls -la out/
 
       - uses: actions/upload-artifact@v4
@@ -242,7 +246,7 @@ jobs:
       - name: 整理附件
         run: |
           mkdir -p assets
-          find artifacts -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.zip' -o -name '*.dmg' \) -exec cp {} assets/ \;
+          find artifacts -type f \( -name '*.deb' -o -name 'AgentLink*.AppImage' -o -name '*.zip' -o -name '*.dmg' \) -exec cp {} assets/ \;
           ls -la assets/
 
       # 用 softprops/action-gh-release 一步建 Release + 上传附件。
