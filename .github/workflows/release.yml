@@ -261,7 +261,7 @@ jobs:
             ### Linux
             ```bash
             # .deb（Debian / Ubuntu）
-            sudo apt install ./agentlink-desktop-*.deb
+            sudo apt install ./agentlink-desktop_*_amd64.deb
 
             # AppImage（任意 x86_64 发行版，不需要 root）
             chmod +x AgentLink-x86_64.AppImage && ./AgentLink-x86_64.AppImage
