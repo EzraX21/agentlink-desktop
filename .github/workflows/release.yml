@@ -32,8 +32,10 @@ jobs:
             libfuse2
 
       - name: 配置与编译
+        # 版本号取自 tag（v1.0.2 → 1.0.2），保证 .deb 文件名与 --version 一致
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DAGENTLINK_VERSION="${GITHUB_REF_NAME}"
           cmake --build build -j"$(nproc)"
 
       # ---- .deb ----
@@ -131,7 +133,8 @@ jobs:
       - name: 配置与编译
         shell: msys2 {0}
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DAGENTLINK_VERSION="${GITHUB_REF_NAME}"
           cmake --build build
 
       - name: windeployqt（把 Qt 库与插件拷到一起）
@@ -212,7 +215,8 @@ jobs:
       - name: 配置与编译
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt)" \
+            -DAGENTLINK_VERSION="${GITHUB_REF_NAME}"
           cmake --build build -j"$(sysctl -n hw.ncpu)"
 
       - name: 组 .app 并部署 Qt
@@ -222,7 +226,8 @@ jobs:
           APP="$PWD/AgentLink.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp build/agentlink-qt "$APP/Contents/MacOS/AgentLink"
-          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          APP_VERSION="${GITHUB_REF_NAME#v}"
+          cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -230,8 +235,8 @@ jobs:
             <key>CFBundleName</key><string>AgentLink</string>
             <key>CFBundleDisplayName</key><string>AgentLink</string>
             <key>CFBundleIdentifier</key><string>io.agentlink.desktop</string>
-            <key>CFBundleVersion</key><string>1.0.0</string>
-            <key>CFBundleShortVersionString</key><string>1.0.0</string>
+            <key>CFBundleVersion</key><string>${APP_VERSION}</string>
+            <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
             <key>CFBundleExecutable</key><string>AgentLink</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>LSMinimumSystemVersion</key><string>11.0</string>

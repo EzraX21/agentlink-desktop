@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
-project(agentlink-qt-client VERSION 1.0.0 LANGUAGES CXX)
+
+# 版本号由构建方传入（Release 工作流用 tag 里的版本），本地默认 0.0.0-dev。
+# 为什么这么做：之前把 1.0.0 写死在这里，发 v1.0.1 时 .deb 文件名与
+# `--version` 里的版本号还是 1.0.0 —— 用户下了 v1.0.1 却看到 1.0.0，很困惑。
+if(NOT DEFINED AGENTLINK_VERSION)
+  set(AGENTLINK_VERSION "0.0.0-dev")
+endif()
+string(REGEX REPLACE "^v" "" AGENTLINK_VERSION "${AGENTLINK_VERSION}")
+project(agentlink-qt-client VERSION ${AGENTLINK_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -50,6 +58,8 @@ if(BUILD_GUI)
   )
   target_link_libraries(agentlink-qt PRIVATE agentlink_core Qt6::Widgets)
   target_compile_options(agentlink-qt PRIVATE -Wall -Wextra)
+  # 把版本号编进去：`--version` 打的要跟 Release tag 一致
+  target_compile_definitions(agentlink-qt PRIVATE AGENTLINK_VERSION="${PROJECT_VERSION}")
   # Windows 上必须是 GUI 子系统（-mwindows）。默认是 console 子系统，
   # 双击时会先弹一个黑色 cmd 窗口；程序一退出它就消失，看起来像"闪一下就没了"。
   if(WIN32)

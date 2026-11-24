@@ -28,7 +28,9 @@ using namespace agentlink;
 int main(int argc, char** argv) {
   QApplication app(argc, argv);
   QApplication::setApplicationName(QStringLiteral("AgentLink"));
-  QApplication::setApplicationVersion(QStringLiteral("1.0.0"));
+  // 版本来自构建（CMake 的 AGENTLINK_VERSION），不再写死 ——
+  // 否则发新版本时 `--version` 还报旧版本号。
+  QApplication::setApplicationVersion(QStringLiteral(AGENTLINK_VERSION));
   QApplication::setOrganizationName(QStringLiteral("AgentLink"));
 
   // `--version`：不进入事件循环，打印版本就退出。
