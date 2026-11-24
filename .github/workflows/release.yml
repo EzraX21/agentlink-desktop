@@ -89,39 +89,58 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Windows：windeployqt 打好的便携包（解压即用，无需管理员权限）
+  # Windows：MSYS2 的 Qt（自带 WebSockets，一条 pacman 装齐）
   # ---------------------------------------------------------------------------
+  #
+  # 为什么不用 Qt 官方二进制 + install-qt-action：官方安装包里 WebSockets 是
+  # **独立 archive**，而 install-qt-action 的 archives 是替换语义 —— 只写
+  # qtwebsockets 会把 base 也排除掉（报 "Failed to locate a Qt installation
+  # directory"），写上 qtbase 又没真的装出 WebSockets 的 cmake 配置。
+  # MSYS2 的包管理把这些都拆好了，一条命令即可，省掉猜 archive 名的循环。
   windows:
     name: Windows 安装包
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 装 Qt
-        uses: jurplel/install-qt-action@v4
+      - uses: msys2/setup-msys2@v2
         with:
-          version: '6.5.3'
-          arch: win64_msvc2019_64
-          cache: true
-          # Qt 的 WebSockets 是**独立 archive**，不在默认集合里 ——
-          # 少了它 CMake 直接报 "Failed to find required Qt component WebSockets"。
-          # 注意它不是 addon 模块（modules: 那条是商业 addon，会报
-          # "The packages ['websockets'] were not found"），要用 archives。
-          archives: 'qtwebsockets'
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-qt6-base
+            mingw-w64-ucrt-x86_64-qt6-websockets
+
+      # 先确认装了什么：如果包名不对，这一屏就告诉我是哪个
+      - name: 确认 Qt 与 WebSockets 在位
+        shell: msys2 {0}
+        run: |
+          qmake6 -query QT_VERSION
+          test -f "$(qmake6 -query QT_INSTALL_LIBS)/cmake/Qt6WebSockets/Qt6WebSocketsConfig.cmake" \
+            && echo "WebSockets cmake 配置在位" \
+            || { echo "缺少 WebSockets"; pacman -Ss qt6-websockets | head; exit 1; }
+          ls /ucrt64/bin | grep -i deployqt || echo "(没找到 windeployqt，下面再说)"
 
       - name: 配置与编译
-        # MSVC 在多配置生成器下把产物放在 Release/ 子目录
+        shell: msys2 {0}
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=ON
-          cmake --build build --config Release -j
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
 
-      - name: windeployqt（把 Qt 库与插件一起拷出来）
-        shell: pwsh
+      - name: windeployqt（把 Qt 库与插件拷到一起）
+        shell: msys2 {0}
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item build\Release\agentlink-qt.exe dist\
-          windeployqt --release --no-translations --no-system-d3d-compiler `
-            --no-opengl-sw dist\agentlink-qt.exe
+          set -e
+          mkdir -p dist
+          cp build/agentlink-qt.exe dist/
+          # MSYS2 里可能叫 windeployqt6 或 windeployqt
+          if command -v windeployqt6 >/dev/null; then WD=windeployqt6; else WD=windeployqt; fi
+          echo "用 $WD"
+          "$WD" --release --no-translations --no-system-d3d-compiler --no-opengl-sw dist/agentlink-qt.exe
+          ls dist | head -20
 
       - name: 打 zip
         shell: pwsh
@@ -143,7 +162,7 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # macOS：macdeployqt 打 dmg
+  # macOS：Homebrew 的 qt（含 WebSockets）+ macdeployqt 打 dmg
   # ---------------------------------------------------------------------------
   macos:
     name: macOS 安装包
@@ -151,27 +170,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # brew 的 qt formula 是完整安装（含 qtwebsockets），不用再挑 archive
       - name: 装 Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.5.3'
-          cache: true
-          # 同上：WebSockets 是独立 archive，不在默认集合里
-          archives: 'qtwebsockets'
+        run: brew install qt
+
+      - name: 确认 WebSockets 在位
+        run: |
+          QT_PREFIX="$(brew --prefix qt)"
+          echo "Qt 在 $QT_PREFIX"
+          test -f "$QT_PREFIX/lib/cmake/Qt6WebSockets/Qt6WebSocketsConfig.cmake" \
+            && echo "WebSockets cmake 配置在位" \
+            || { echo "缺少 WebSockets"; ls "$QT_PREFIX/lib/cmake" | head -30; exit 1; }
 
       - name: 配置与编译
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=ON
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
           cmake --build build -j"$(sysctl -n hw.ncpu)"
 
-      - name: 打 app bundle 并部署 Qt
+      - name: 组 .app 并部署 Qt
         run: |
           set -euo pipefail
-          cmake --install build --prefix /tmp/AgentLink
-          # macdeployqt 要把可执行文件变成 .app；这里手动组一个最小 bundle
-          APP=/tmp/AgentLink/AgentLink.app
+          QT_PREFIX="$(brew --prefix qt)"
+          APP="$PWD/AgentLink.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp /tmp/AgentLink/bin/agentlink-qt "$APP/Contents/MacOS/AgentLink"
+          cp build/agentlink-qt "$APP/Contents/MacOS/AgentLink"
           cat > "$APP/Contents/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -188,12 +211,12 @@ jobs:
           </dict>
           </plist>
           PLIST
-          macdeployqt "$APP"
+          "$QT_PREFIX/bin/macdeployqt" "$APP"
 
       - name: 打 dmg
         run: |
           set -euo pipefail
-          hdiutil create -volname "AgentLink" -srcfolder /tmp/AgentLink/AgentLink.app \
+          hdiutil create -volname "AgentLink" -srcfolder AgentLink.app \
             -ov -format UDZO AgentLink-macos.dmg
           ls -la AgentLink-macos.dmg
 
